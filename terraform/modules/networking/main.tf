@@ -2,7 +2,7 @@ resource "aws_vpc" "main" {
   cidr_block = var.vpc_cidr
 
   tags = {
-    Name = "staging-vpc"
+    Name = "${var.environment}-vpc"
   }
 }
 
@@ -10,7 +10,7 @@ resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
 
   tags = {
-    Name = "staging-igw"
+    Name = "${var.environment}-igw"
   }
 }
 
@@ -23,7 +23,7 @@ resource "aws_route_table" "public" {
   }
 
   tags = {
-    Name = "staging-public-rt"
+    Name = "${var.environment}-public-rt"
   }
 }
 
@@ -36,7 +36,7 @@ resource "aws_subnet" "public" {
   map_public_ip_on_launch = true
 
   tags = {
-    Name = "staging-public-${var.availability_zones[count.index]}"
+    Name = "${var.environment}-public-${var.availability_zones[count.index]}"
   }
 }
 
@@ -51,7 +51,7 @@ resource "aws_eip" "nat" {
   domain = "vpc"
 
   tags = {
-    Name = "staging-nat-eip"
+    Name = "${var.environment}-nat-eip"
   }
 
   depends_on = [aws_internet_gateway.main]
@@ -62,7 +62,7 @@ resource "aws_nat_gateway" "main" {
   subnet_id     = aws_subnet.public[0].id
 
   tags = {
-    Name = "staging-nat"
+    Name = "${var.environment}-nat"
   }
 
   depends_on = [aws_internet_gateway.main]
@@ -76,7 +76,7 @@ resource "aws_subnet" "private" {
   availability_zone = var.availability_zones[count.index]
 
   tags = {
-    Name = "staging-private-${var.availability_zones[count.index]}"
+    Name = "${var.environment}-private-${var.availability_zones[count.index]}"
   }
 }
 
@@ -89,7 +89,7 @@ resource "aws_route_table" "private" {
   }
 
   tags = {
-    Name = "staging-private-rt"
+    Name = "${var.environment}-private-rt"
   }
 }
 
