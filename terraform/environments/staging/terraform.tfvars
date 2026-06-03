@@ -1,4 +1,5 @@
-environment = "staging"
+environment  = "staging"
+cluster_name = "kubeplay-staging"
 
 vpc_cidr = "10.0.0.0/16"
 
