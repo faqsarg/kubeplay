@@ -8,3 +8,11 @@ module "networking" {
   private_subnets    = var.private_subnets
   availability_zones = var.availability_zones
 }
+
+module "eks" {
+  source = "../../modules/eks"
+
+  environment        = var.environment
+  subnet_ids         = concat(module.networking.public_subnet_ids, module.networking.private_subnet_ids)
+  private_subnet_ids = module.networking.private_subnet_ids
+}
