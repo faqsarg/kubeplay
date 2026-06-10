@@ -6,8 +6,8 @@ the focus: networking, managed Kubernetes, IAM, and remote state are all defined
 as code and reproducible from scratch.
 
 > **Status:** Foundations complete — remote state, networking, and the EKS cluster
-> (with IRSA) are provisioned and verified. Application workloads, ingress, CI/CD,
-> and observability are planned.
+> (with IRSA) are provisioned and verified. The backend API exists and runs locally
+> against Postgres; Kubernetes manifests, ingress, CI/CD, and observability are planned.
 
 ---
 
@@ -56,7 +56,8 @@ State backend:  S3 (versioned) + DynamoDB (state locking)
 | `terraform/modules/networking/` | VPC, subnets, IGW, NAT, route tables, EKS subnet tags. |
 | `terraform/modules/eks/` | EKS cluster, IAM roles, SPOT node group, OIDC provider for IRSA. |
 | `terraform/environments/staging/` | Wires the modules together for the staging environment. |
-| `apps/`, `kubernetes/`, `.github/`, `docs/` | Reserved for upcoming phases (app, manifests, CI/CD, ADRs). |
+| `apps/backend/` | Go REST API (health + items CRUD) backed by Postgres. |
+| `kubernetes/`, `.github/`, `docs/` | Reserved for upcoming phases (manifests, CI/CD, ADRs). |
 
 ---
 
@@ -124,6 +125,47 @@ and recreate it (~15 min) next session:
 ```bash
 cd terraform/environments/staging
 terraform destroy
+```
+
+---
+
+## Application — Backend API
+
+A small Go REST API (`apps/backend/`) that serves as the workload to deploy.
+
+**Stack:** Go (`net/http`, stdlib router) · `pgx/v5` connection pool · PostgreSQL.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Liveness/readiness probe — `{"status":"ok","version":"..."}`. |
+| `GET` | `/api/items` | List all items. |
+| `POST` | `/api/items` | Create an item — body `{"name":"..."}`. |
+
+Configuration is read from the environment (`DATABASE_URL`); the process fails fast
+on startup if it is missing or the database is unreachable. The `items` table is
+created on boot via `CREATE TABLE IF NOT EXISTS`.
+
+### Local development
+
+```bash
+cd apps/backend
+cp .env.example .env          # adjust credentials; .env is gitignored
+
+docker compose up -d          # starts PostgreSQL
+set -a && . ./.env && set +a  # load env vars into the shell
+go run .                      # API on :8080
+
+curl localhost:8080/api/items
+curl -X POST localhost:8080/api/items -d '{"name":"hello"}'
+```
+
+### Container image
+
+A multi-stage build produces a static binary on a `distroless` base — a ~17 MB
+image running as a non-root user:
+
+```bash
+docker build -t kubeplay-backend:dev apps/backend
 ```
 
 ---

@@ -1,4 +1,9 @@
+# terraform
 .terraform/
 terraform.tfstate
 terraform.tfstate.backup
 *.tfplan
+
+# secrets / local env (keep .env.example)
+.env
+!.env.example
