@@ -29,11 +29,31 @@ func ensureSchema(ctx context.Context) error {
 	return err
 }
 
+// health is the liveness check: cheap and local. It only proves the process
+// is responsive — it must NOT touch external dependencies like the database,
+// or a DB outage would restart every pod (CrashLoopBackOff) without fixing anything.
 func health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":  "ok",
 		"version": "1.0.0",
 	})
+}
+
+// ready is the readiness check: it verifies the pod can actually serve traffic
+// by pinging the database. On failure K8s removes the pod from the Service
+// (no traffic) but keeps it alive, so it recovers on its own when the DB returns.
+func ready(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	if err := db.Ping(ctx); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status": "not ready",
+			"reason": err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 func listItems(w http.ResponseWriter, r *http.Request) {
@@ -117,6 +137,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", health)
+	mux.HandleFunc("GET /ready", ready)
 	mux.HandleFunc("GET /api/items", listItems)
 	mux.HandleFunc("POST /api/items", createItem)
 
