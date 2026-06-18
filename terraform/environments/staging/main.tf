@@ -16,3 +16,10 @@ module "eks" {
   subnet_ids         = concat(module.networking.public_subnet_ids, module.networking.private_subnet_ids)
   private_subnet_ids = module.networking.private_subnet_ids
 }
+
+module "ecr" {
+  source = "../../modules/ecr"
+
+  environment     = var.environment
+  repository_name = "backend"
+}
