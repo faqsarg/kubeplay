@@ -137,7 +137,8 @@ A small Go REST API (`apps/backend/`) that serves as the workload to deploy.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/health` | Liveness/readiness probe — `{"status":"ok","version":"..."}`. |
+| `GET` | `/health` | **Liveness** probe — process is up; `{"status":"ok","version":"..."}`. |
+| `GET` | `/ready` | **Readiness** probe — dependencies (DB) reachable; gates Service traffic. |
 | `GET` | `/api/items` | List all items. |
 | `POST` | `/api/items` | Create an item — body `{"name":"..."}`. |
 
