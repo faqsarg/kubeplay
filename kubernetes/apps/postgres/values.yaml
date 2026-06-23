@@ -1,0 +1,22 @@
+# Single instance, no replication — the DB is the one stateful pet.
+architecture: standalone
+
+auth:
+  username: kubeplay
+  database: kubeplay
+  # password lives in a Secret
+  existingSecret: postgres-credentials
+  secretKeys:
+    adminPasswordKey: postgres-password   # password for the "postgres" superuser
+    userPasswordKey: password             # password for the "kubeplay" user
+primary:
+  persistence:
+    enabled: true      # keep the PVC so data survives the pod
+    size: 1Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
