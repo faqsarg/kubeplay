@@ -19,6 +19,16 @@ spec:
           image: <ECR_REPO_URL>:<SHA>   # placeholder — replaced at deploy time
           ports:
             - containerPort: 8080
+          env:
+            # 1. pull the password out of the Secret into an env var
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: password
+            # 2. compose the DSN, injecting $(DB_PASSWORD) defined above.
+            - name: DATABASE_URL
+              value: "postgres://kubeplay:$(DB_PASSWORD)@postgres-postgresql:5432/kubeplay?sslmode=disable"
           resources:
             requests:
               cpu: 100m
