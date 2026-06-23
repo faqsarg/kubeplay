@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>kubeplay — items</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; }
+    li { padding: .25rem 0; }
+    form { display: flex; gap: .5rem; margin: 1rem 0; }
+    input { flex: 1; padding: .5rem; }
+    .error { color: #b00; }
+  </style>
+</head>
+<body>
+  <h1>Items</h1>
+
+  <form id="new-item">
+    <input id="name" placeholder="new item name" required />
+    <button type="submit">Add</button>
+  </form>
+
+  <p id="status" class="error"></p>
+  <ul id="list"></ul>
+
+  <script>
+    const list = document.getElementById("list");
+    const status = document.getElementById("status");
+
+    // same-origin: no host. The Ingress routes /api/* to the backend Service.
+    async function load() {
+      status.textContent = "";
+      try {
+        const res = await fetch("/api/items");
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const items = await res.json();
+        list.innerHTML = "";
+        for (const it of items ?? []) {
+          const li = document.createElement("li");
+          li.textContent = `#${it.id} — ${it.name}`;
+          list.appendChild(li);
+        }
+      } catch (e) {
+        status.textContent = "could not load items: " + e.message;
+      }
+    }
+
+    document.getElementById("new-item").addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const name = document.getElementById("name").value.trim();
+      if (!name) return;
+      status.textContent = "";
+      try {
+        const res = await fetch("/api/items", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name }),
+        });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        ev.target.reset();
+        await load();
+      } catch (e) {
+        status.textContent = "could not create item: " + e.message;
+      }
+    });
+
+    load();
+  </script>
+</body>
+</html>
