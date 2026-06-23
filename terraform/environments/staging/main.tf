@@ -23,3 +23,10 @@ module "ecr" {
   environment     = var.environment
   repository_name = "backend"
 }
+
+module "ecr_frontend" {
+  source = "../../modules/ecr"
+
+  environment     = var.environment
+  repository_name = "frontend"
+}
