@@ -11,7 +11,12 @@ the app up **from scratch on a freshly created cluster**, with nothing kept in m
 ## 0. Prerequisites
 
 ```bash
-# Cluster up (creates VPC, EKS, ECR)
+# Durable layer (one-time; survives destroy): S3 backend + AWS Secrets Manager secret
+# + ESO IRSA prerequisites. Re-run only after changing bootstrap/ (e.g. the random provider).
+terraform -chdir=bootstrap init
+terraform -chdir=bootstrap apply
+
+# Cluster up (creates VPC, EKS, ECR, the eso_irsa role)
 cd terraform/environments/staging && terraform apply
 
 # Point kubeconfig at the new cluster
@@ -46,21 +51,51 @@ kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/late
 
 ---
 
-## 2. Secret `postgres-credentials`  *(BEFORE Postgres and the backend)*
+## 2. Secret `postgres-credentials` via ESO  *(BEFORE Postgres and the backend)*
 
-Created **imperatively**, never committed to Git in plaintext (Phase 7 replaces this with
-SOPS). Two consumers read it: the Postgres chart (`existingSecret`) and the backend
-Deployment (`secretKeyRef`). If it does not exist, both pods get stuck in
-`CreateContainerConfigError`.
+The Secret is **not** created by hand. The source of truth is AWS Secrets Manager
+(`kubeplay/staging/postgres`, created in the `bootstrap/` Terraform layer); the External
+Secrets Operator (ESO) reads it and materializes a native K8s Secret named
+`postgres-credentials` in the `default` namespace. Two consumers read that Secret: the
+Postgres chart (`existingSecret`) and the backend Deployment (`secretKeyRef`). If it does
+not exist, both pods get stuck in `CreateContainerConfigError`.
+
+ESO authenticates to AWS via IRSA — no static keys. The `eso_irsa` role (least privilege:
+`GetSecretValue` on that one secret) is created by `terraform apply`; grab its ARN:
 
 ```bash
-kubectl create secret generic postgres-credentials \
-  --from-literal=postgres-password='<superuser-pass>' \
-  --from-literal=password='<kubeplay-pass>'
+ROLE_ARN=$(terraform -chdir=terraform/environments/staging output -raw eso_irsa_role_arn)
 ```
 
-- `postgres-password` → `postgres` superuser
-- `password` → app user `kubeplay` (the only one the backend uses)
+Install ESO into its own namespace, annotating its ServiceAccount with the role ARN. The
+SA name+namespace MUST be `external-secrets`/`external-secrets` — that is exactly what the
+role's trust policy pins via the OIDC `sub` claim.
+
+```bash
+helm repo add external-secrets https://charts.external-secrets.io
+helm repo update
+
+helm install external-secrets external-secrets/external-secrets \
+  --namespace external-secrets --create-namespace \
+  --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN"
+
+# wait for the operator (and its CRDs) to be ready
+kubectl rollout status deployment/external-secrets -n external-secrets
+```
+
+Apply the connection config + the recipe, then confirm ESO created the Secret:
+
+```bash
+kubectl apply -f kubernetes/apps/eso/secretstore.yaml      # ClusterSecretStore (cluster-scoped)
+kubectl apply -f kubernetes/apps/eso/externalsecret.yaml   # ExternalSecret in default
+
+# the ExternalSecret should report SecretSynced; the Secret must exist BEFORE Postgres boots
+kubectl get externalsecret postgres-credentials -n default
+kubectl get secret postgres-credentials -n default
+```
+
+- `password` → app user `kubeplay` (the backend's `DATABASE_URL` and the chart's `userPasswordKey`)
+- `postgres-password` → `postgres` superuser (chart-internal only)
 
 ---
 
@@ -73,7 +108,10 @@ which is exactly the host hardcoded in the backend's `DATABASE_URL`.
 helm repo add bitnami https://charts.bitnami.com/bitnami
 helm repo update
 
+# chart 16.7.27 → PostgreSQL 17.6 (newest image still on bitnamilegacy; see values.yaml).
+# Pin the version: the latest chart defaults to a broken bitnami/postgresql:latest.
 helm install postgres bitnami/postgresql \
+  --version 16.7.27 \
   -f kubernetes/apps/postgres/values.yaml
 
 # wait for the pod to become Ready
