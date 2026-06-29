@@ -5,9 +5,12 @@ built to mirror the day-to-day work of a Platform Engineer. The infrastructure i
 the focus: networking, managed Kubernetes, IAM, and remote state are all defined
 as code and reproducible from scratch.
 
-> **Status:** Foundations complete — remote state, networking, and the EKS cluster
-> (with IRSA) are provisioned and verified. The backend API exists and runs locally
-> against Postgres; Kubernetes manifests, ingress, CI/CD, and observability are planned.
+> **Status:** Platform foundations + a full in-cluster application are working.
+> Remote state, networking, and the EKS cluster (with IRSA) are provisioned and
+> verified. A backend API, a static frontend, and PostgreSQL run on the cluster, with
+> database credentials delivered by the External Secrets Operator from AWS Secrets
+> Manager (no static keys). Ingress + TLS, CI/CD, persistent storage (EBS CSI), and
+> observability are the next phases.
 
 ---
 
@@ -52,12 +55,17 @@ State backend:  S3 (versioned) + DynamoDB (state locking)
 
 | Path | Purpose |
 |------|---------|
-| `bootstrap/` | One-time setup of the Terraform **remote state backend** (S3 + DynamoDB). |
+| `bootstrap/` | One-time **durable** layer: Terraform state backend (S3 + DynamoDB) and the AWS Secrets Manager secret for Postgres. |
 | `terraform/modules/networking/` | VPC, subnets, IGW, NAT, route tables, EKS subnet tags. |
 | `terraform/modules/eks/` | EKS cluster, IAM roles, SPOT node group, OIDC provider for IRSA. |
+| `terraform/modules/ecr/` | ECR repositories (immutable tags, scan-on-push, keep-last-10 lifecycle). |
+| `terraform/modules/irsa/` | **Generic** IAM-Role-for-ServiceAccount module, reused per workload (ESO today). |
 | `terraform/environments/staging/` | Wires the modules together for the staging environment. |
 | `apps/backend/` | Go REST API (health + items CRUD) backed by Postgres. |
-| `kubernetes/`, `.github/`, `docs/` | Reserved for upcoming phases (manifests, CI/CD, ADRs). |
+| `apps/frontend/` | Static HTML/JS page (nginx) that calls the API same-origin. |
+| `kubernetes/apps/` | Deployment/Service/HPA manifests for backend, frontend, Postgres values, and the ESO `ClusterSecretStore` + `ExternalSecret`. |
+| `scripts/deploy.sh` | One-command deploy/teardown of the whole app on a fresh cluster. |
+| `docs/runbooks/` | Operational procedures (the manual deploy sequence). |
 
 ---
 
@@ -98,6 +106,26 @@ Provisions the managed Kubernetes cluster:
 
 ---
 
+## Secrets management (External Secrets Operator)
+
+Database credentials never live in Git. The flow is fully keyless, built on IRSA:
+
+```
+AWS Secrets Manager  ──(only ESO, via IRSA)──►  K8s Secret  ──►  Postgres + backend
+  kubeplay/staging/postgres                      postgres-credentials
+```
+
+- The secret is created **once** in the durable `bootstrap/` layer, so it survives the
+  per-session `destroy` of the cluster.
+- The generic `irsa` module grants a least-privilege role (`GetSecretValue` on that one
+  secret) to ESO's ServiceAccount — the role's trust policy pins the exact
+  `namespace:serviceaccount` via the OIDC `sub` claim. No static AWS keys anywhere.
+- A cluster-scoped `ClusterSecretStore` (connection config) plus a namespaced
+  `ExternalSecret` (the recipe) tell ESO to materialize a native K8s `Secret`. Postgres
+  and the backend just consume that Secret — neither talks to AWS.
+
+---
+
 ## Usage
 
 **Prerequisites:** Terraform `>= 1.5`, AWS CLI configured, `kubectl`.
@@ -114,17 +142,27 @@ terraform init
 terraform apply
 
 # 3. Connect kubectl to the cluster
-aws eks update-kubeconfig --region eu-west-1 --name kubeplay-staging
+aws eks update-kubeconfig --region eu-west-1 --name staging-eks
 kubectl get nodes
+```
+
+### Deploy the application
+`scripts/deploy.sh` brings the whole app up on a fresh cluster (metrics-server → ESO
+→ Postgres → build/push images → backend + frontend), then verifies it. The manual,
+step-by-step version with the "why" behind each step lives in
+[`docs/runbooks/deploy.md`](docs/runbooks/deploy.md).
+
+```bash
+./scripts/deploy.sh
 ```
 
 ### Tear down
 The EKS control plane bills hourly, so destroy the environment when you're done
-and recreate it (~15 min) next session:
+and recreate it (~15 min) next session. The script removes the Postgres PVC before
+`destroy` (avoiding an orphan EBS volume); the durable `bootstrap/` layer is left intact:
 
 ```bash
-cd terraform/environments/staging
-terraform destroy
+./scripts/deploy.sh teardown
 ```
 
 ---
@@ -178,7 +216,7 @@ Per-environment values live in `terraform.tfvars`. Staging defaults:
 | Variable | Value |
 |----------|-------|
 | `environment` | `staging` |
-| `cluster_name` | `kubeplay-staging` |
+| `cluster_name` | `staging-eks` |
 | `vpc_cidr` | `10.0.0.0/16` |
 | `public_subnets` | `10.0.1.0/24`, `10.0.2.0/24` |
 | `private_subnets` | `10.0.3.0/24`, `10.0.4.0/24` |
@@ -197,6 +235,13 @@ Per-environment values live in `terraform.tfvars`. Staging defaults:
 - **Single NAT Gateway** — trades cross-AZ resilience for ~$30/mo savings.
 - **IRSA over node IAM** — least-privilege at the pod level rather than granting
   broad permissions to every node.
+- **ESO over committed secrets / SOPS** — the repo is public, so no ciphertext lives in
+  Git at all; AWS Secrets Manager is the source of truth and ESO leverages the existing
+  IRSA wiring. The same generic `irsa` module will back future controllers (EBS CSI,
+  cluster-autoscaler, AWS Load Balancer Controller).
+- **Pinned `bitnamilegacy` Postgres image** — Bitnami moved its free images to a frozen
+  `bitnamilegacy/` namespace (Aug 2025); the chart is pinned to a known-good PostgreSQL
+  17.6 image there. A documented stopgap until a maintained image is adopted.
 
 ---
 
