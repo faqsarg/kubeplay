@@ -1,8 +1,14 @@
 # Postgres credentials — source of truth for ESO.
 # Lives in the bootstrap (durable) layer so it survives `destroy` of the cluster.
 
-# 1. generate a strong password (kept in TF state, which sits encrypted+versioned in S3)
+# 1. generate strong passwords (kept in TF state, which sits encrypted+versioned in S3)
 resource "random_password" "postgres" {
+  length  = 24
+  special = false
+}
+
+# the "postgres" superuser needs its own distinct password (bitnami adminPasswordKey)
+resource "random_password" "postgres_admin" {
   length  = 24
   special = false
 }
@@ -20,7 +26,8 @@ resource "aws_secretsmanager_secret" "postgres" {
 resource "aws_secretsmanager_secret_version" "postgres" {
   secret_id = aws_secretsmanager_secret.postgres.id
   secret_string = jsonencode({
-    username = "kubeplay"
-    password = random_password.postgres.result
+    username          = "kubeplay"
+    password          = random_password.postgres.result       # the "kubeplay" app user
+    postgres-password = random_password.postgres_admin.result # the "postgres" superuser
   })
 }
