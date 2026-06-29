@@ -1,6 +1,15 @@
 # Single instance, no replication — the DB is the one stateful pet.
 architecture: standalone
 
+# Bitnami moved all versioned images to `bitnamilegacy/` on 2025-08-28 (the old
+# `bitnami/postgresql` only serves a broken `:latest` now). Pin to the legacy repo.
+# STOPGAP: legacy images are frozen + get no security updates; PG18 never landed
+# there, so we ride the newest available (PostgreSQL 17.6, chart 16.7.27).
+image:
+  registry: docker.io
+  repository: bitnamilegacy/postgresql
+  tag: 17.6.0-debian-12-r4
+
 auth:
   username: kubeplay
   database: kubeplay
