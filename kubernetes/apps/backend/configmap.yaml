@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  labels:
+    app: backend
+# Non-sensitive connection config. Plaintext on purpose: git is the source of
+# truth here. The sensitive piece (DB_PASSWORD) comes from the postgres-credentials
+# Secret, synced by ESO. The Deployment assembles DATABASE_URL from both.
+data:
+  DB_HOST: postgres-postgresql
+  DB_PORT: "5432"
+  DB_NAME: kubeplay
+  DB_USER: kubeplay

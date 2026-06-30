@@ -123,6 +123,7 @@ deploy() {
 
   # 5. Apply app manifests (substitute the image placeholder) -----------------
   log "5. Apply backend + frontend manifests"
+  kubectl apply -f kubernetes/apps/backend/configmap.yaml
   sed "s|<ECR_REPO_URL>:<SHA>|$ECR/staging-backend:$SHA|g" \
     kubernetes/apps/backend/deployment.yaml | kubectl apply -f -
   kubectl apply -f kubernetes/apps/backend/service.yaml

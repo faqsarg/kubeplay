@@ -20,15 +20,37 @@ spec:
           ports:
             - containerPort: 8080
           env:
-            # 1. pull the password out of the Secret into an env var
+            # 1. non-sensitive pieces from the ConfigMap (git is the source of truth)
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: backend-config
+                  key: DB_HOST
+            - name: DB_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: backend-config
+                  key: DB_PORT
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: backend-config
+                  key: DB_NAME
+            - name: DB_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: backend-config
+                  key: DB_USER
+            # 2. sensitive piece from the Secret (synced by ESO from Secrets Manager)
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: postgres-credentials
                   key: password
-            # 2. compose the DSN, injecting $(DB_PASSWORD) defined above.
+            # 3. assemble the DSN from the pieces above. $(VAR) resolves against
+            #    env vars declared earlier in this same container.
             - name: DATABASE_URL
-              value: "postgres://kubeplay:$(DB_PASSWORD)@postgres-postgresql:5432/kubeplay?sslmode=disable"
+              value: "postgres://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)?sslmode=disable"
           resources:
             requests:
               cpu: 100m
