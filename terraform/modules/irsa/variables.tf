@@ -29,5 +29,12 @@ variable "service_account_name" {
 
 variable "policy_json" {
   type        = string
-  description = "IAM permission policy (JSON) attached to the role. The caller defines what this role can do."
+  default     = null
+  description = "Inline IAM permission policy (JSON) attached to the role. Optional: roles that only use managed policies can omit it."
+}
+
+variable "managed_policy_arns" {
+  type        = list(string)
+  default     = []
+  description = "AWS-managed policy ARNs to attach (e.g. AmazonEBSCSIDriverPolicy). Use when AWS already maintains the right policy."
 }

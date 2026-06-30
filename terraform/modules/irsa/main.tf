@@ -31,9 +31,18 @@ resource "aws_iam_role" "this" {
   assume_role_policy = data.aws_iam_policy_document.assume_role.json
 }
 
-# permissions the caller decided this role should have
+# Inline permissions the caller defined (optional — skipped when only managed
+# policies are used, e.g. the EBS CSI driver).
 resource "aws_iam_role_policy" "this" {
+  count  = var.policy_json == null ? 0 : 1
   name   = "${var.environment}-${var.name}-policy"
   role   = aws_iam_role.this.id
   policy = var.policy_json
+}
+
+# AWS-managed policies the caller asked for (one attachment per ARN).
+resource "aws_iam_role_policy_attachment" "managed" {
+  for_each   = toset(var.managed_policy_arns)
+  role       = aws_iam_role.this.name
+  policy_arn = each.value
 }

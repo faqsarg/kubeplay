@@ -1,0 +1,16 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    # PVCs without an explicit storageClassName land here.
+    storageclass.kubernetes.io/is-default-class: "true"
+# The EBS CSI driver (installed as an EKS addon) backs this class. The old gp2
+# class uses the dead in-tree provisioner and must NOT be the default.
+provisioner: ebs.csi.aws.com
+# Bind+provision the volume only once a pod is scheduled, so the EBS volume is
+# created in the same AZ as the node that will mount it.
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+parameters:
+  type: gp3

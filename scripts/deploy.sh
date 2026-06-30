@@ -63,6 +63,17 @@ deploy() {
   kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
   kubectl rollout status deployment/metrics-server -n kube-system --timeout=180s
 
+  # 1b. Storage ---------------------------------------------------------------
+  # The aws-ebs-csi-driver addon was installed by Terraform above. Make gp3 the
+  # default StorageClass so Postgres' PVC binds to a real EBS volume. EKS may
+  # ship gp2 as default (dead in-tree provisioner) — demote it to avoid two
+  # defaults, which would leave the PVC unscheduled.
+  log "1b. Default StorageClass -> gp3 (EBS CSI)"
+  kubectl apply -f kubernetes/platform/storage/gp3-storageclass.yaml
+  kubectl patch storageclass gp2 \
+    -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}' \
+    2>/dev/null || true
+
   # 2. ESO --------------------------------------------------------------------
   log "2. External Secrets Operator + secret sync"
   ROLE_ARN="$(terraform -chdir="$STAGING" output -raw eso_irsa_role_arn)"
