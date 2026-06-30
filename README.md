@@ -9,8 +9,8 @@ as code and reproducible from scratch.
 > Remote state, networking, and the EKS cluster (with IRSA) are provisioned and
 > verified. A backend API, a static frontend, and PostgreSQL run on the cluster, with
 > database credentials delivered by the External Secrets Operator from AWS Secrets
-> Manager (no static keys). Ingress + TLS, CI/CD, persistent storage (EBS CSI), and
-> observability are the next phases.
+> Manager (no static keys) and persistent storage on EBS volumes via the AWS EBS CSI
+> driver. Ingress + TLS, CI/CD, and observability are the next phases.
 
 ---
 
@@ -237,8 +237,15 @@ Per-environment values live in `terraform.tfvars`. Staging defaults:
   broad permissions to every node.
 - **ESO over committed secrets / SOPS** — the repo is public, so no ciphertext lives in
   Git at all; AWS Secrets Manager is the source of truth and ESO leverages the existing
-  IRSA wiring. The same generic `irsa` module will back future controllers (EBS CSI,
-  cluster-autoscaler, AWS Load Balancer Controller).
+  IRSA wiring. The same generic `irsa` module already backs the EBS CSI driver and will
+  back future controllers (cluster-autoscaler, AWS Load Balancer Controller).
+- **EBS CSI driver + default `gp3` StorageClass** — the in-tree `gp2` provisioner was
+  removed in EKS 1.23+, so PersistentVolumeClaims stay `Pending` without it. The managed
+  `aws-ebs-csi-driver` addon (wired via IRSA) provisions real EBS volumes, and `gp3` is
+  set as the default class so Postgres data survives pod restarts.
+- **Config vs. secrets split** — non-sensitive DB settings live in a `ConfigMap`
+  (versioned in Git), the password comes from the ESO-synced `Secret`, and the Deployment
+  assembles `DATABASE_URL` from both via `$(VAR)` expansion.
 - **Pinned `bitnamilegacy` Postgres image** — Bitnami moved its free images to a frozen
   `bitnamilegacy/` namespace (Aug 2025); the chart is pinned to a known-good PostgreSQL
   17.6 image there. A documented stopgap until a maintained image is adopted.
