@@ -1,0 +1,42 @@
+# The Ingress resource: the ROUTING RULES that nginx reads. Pure config, not a pod.
+# One host, path-based split — exactly what the frontend expects (it calls /api/*
+# same-origin, so browser and API share an origin and there is no CORS).
+#
+# <HOST> is a placeholder. The nip.io host depends on the NLB's IP, which only
+# exists after the LB is provisioned and changes every apply/destroy — so deploy.sh
+# resolves it and substitutes <HOST> at deploy time (same trick as the image tag).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kubeplay
+  annotations:
+    # cert-manager watches Ingresses with this annotation: it auto-creates a
+    # Certificate for the tls hosts below and drops the cert into `kubeplay-tls`.
+    # Start on staging (untrusted but no rate limits); flip to -prod once it issues.
+    cert-manager.io/cluster-issuer: letsencrypt-staging
+spec:
+  ingressClassName: nginx        # "this Ingress is handled by the nginx controller"
+  tls:
+    - hosts:
+        - <HOST>
+      secretName: kubeplay-tls   # nginx reads the cert from here to terminate TLS
+  rules:
+    - host: <HOST>
+      http:
+        paths:
+          # Most-specific path wins: /api/* goes to the backend...
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8080
+          # ...everything else falls through to the frontend.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80
