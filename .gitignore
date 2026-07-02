@@ -7,3 +7,6 @@ terraform.tfstate.backup
 # secrets / local env (keep .env.example)
 .env
 !.env.example
+
+# personal planning doc — kept local only
+plan.md
