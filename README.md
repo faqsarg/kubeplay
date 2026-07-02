@@ -5,12 +5,14 @@ built to mirror the day-to-day work of a Platform Engineer. The infrastructure i
 the focus: networking, managed Kubernetes, IAM, and remote state are all defined
 as code and reproducible from scratch.
 
-> **Status:** Platform foundations + a full in-cluster application are working.
-> Remote state, networking, and the EKS cluster (with IRSA) are provisioned and
-> verified. A backend API, a static frontend, and PostgreSQL run on the cluster, with
-> database credentials delivered by the External Secrets Operator from AWS Secrets
-> Manager (no static keys) and persistent storage on EBS volumes via the AWS EBS CSI
-> driver. Ingress + TLS, CI/CD, and observability are the next phases.
+> **Status:** Platform foundations + a full in-cluster application are working, now
+> reachable from the internet over HTTPS. Remote state, networking, and the EKS cluster
+> (with IRSA) are provisioned and verified. A backend API, a static frontend, and
+> PostgreSQL run on the cluster, with database credentials delivered by the External
+> Secrets Operator from AWS Secrets Manager (no static keys) and persistent storage on
+> EBS volumes via the AWS EBS CSI driver. Public access is served by the NGINX Ingress
+> Controller behind an AWS NLB, with TLS certificates issued automatically by
+> cert-manager + Let's Encrypt. CI/CD and observability are the next phases.
 
 ---
 
@@ -63,7 +65,8 @@ State backend:  S3 (versioned) + DynamoDB (state locking)
 | `terraform/environments/staging/` | Wires the modules together for the staging environment. |
 | `apps/backend/` | Go REST API (health + items CRUD) backed by Postgres. |
 | `apps/frontend/` | Static HTML/JS page (nginx) that calls the API same-origin. |
-| `kubernetes/apps/` | Deployment/Service/HPA manifests for backend, frontend, Postgres values, and the ESO `ClusterSecretStore` + `ExternalSecret`. |
+| `kubernetes/apps/` | Deployment/Service/HPA manifests for backend, frontend, Postgres values, the ESO `ClusterSecretStore` + `ExternalSecret`, and the `Ingress` (path routing + TLS). |
+| `kubernetes/platform/` | Cluster-wide platform pieces: `gp3` StorageClass, ingress-nginx Helm values, and cert-manager `ClusterIssuer`s. |
 | `scripts/deploy.sh` | One-command deploy/teardown of the whole app on a fresh cluster. |
 | `docs/runbooks/` | Operational procedures (the manual deploy sequence). |
 
@@ -126,6 +129,35 @@ AWS Secrets Manager  ──(only ESO, via IRSA)──►  K8s Secret  ──► 
 
 ---
 
+## Ingress & TLS
+
+A single public entry point fronts the whole app, with HTTPS terminated in-cluster:
+
+```
+Internet ──► AWS NLB (L4) ──► NGINX Ingress Controller (L7) ──┬─► /api/* → backend
+             one per cluster    terminates TLS, routes by path └─► /*     → frontend
+```
+
+- **NGINX Ingress Controller** runs as pods behind a single **AWS NLB** (requested via a
+  Service annotation, so all L7 routing happens in NGINX and the load balancer stays a
+  cheap L4 pipe). One `Ingress` resource routes by path on one host: `/api/*` to the
+  backend, everything else to the frontend — same-origin, so the browser makes no CORS
+  requests.
+- **cert-manager + Let's Encrypt** issue and renew the TLS certificate automatically. A
+  single annotation on the `Ingress` makes cert-manager solve the ACME HTTP-01 challenge
+  through NGINX and drop the signed certificate into a `Secret` that NGINX serves. Two
+  `ClusterIssuer`s exist: **staging** (untrusted but generous rate limits, used while
+  iterating) and **prod** (the real trusted certificate).
+- **Domain** — the public host is a free `nip.io` name derived from the NLB's IP
+  (`<nlb-ip>.nip.io`), resolved and injected at deploy time so nothing is hardcoded across
+  the per-session `apply`/`destroy` cycle.
+
+At teardown the Ingress controller is uninstalled **before** `terraform destroy` so the
+NLB (an AWS resource not tracked in Terraform state) is deprovisioned and can't block VPC
+deletion.
+
+---
+
 ## Usage
 
 **Prerequisites:** Terraform `>= 1.5`, AWS CLI configured, `kubectl`.
@@ -148,7 +180,8 @@ kubectl get nodes
 
 ### Deploy the application
 `scripts/deploy.sh` brings the whole app up on a fresh cluster (metrics-server → ESO
-→ Postgres → build/push images → backend + frontend), then verifies it. The manual,
+→ ingress-nginx + cert-manager → Postgres → build/push images → backend + frontend →
+Ingress + TLS), then verifies it and prints the public HTTPS URL. The manual,
 step-by-step version with the "why" behind each step lives in
 [`docs/runbooks/deploy.md`](docs/runbooks/deploy.md).
 
@@ -243,6 +276,14 @@ Per-environment values live in `terraform.tfvars`. Staging defaults:
   removed in EKS 1.23+, so PersistentVolumeClaims stay `Pending` without it. The managed
   `aws-ebs-csi-driver` addon (wired via IRSA) provisions real EBS volumes, and `gp3` is
   set as the default class so Postgres data survives pod restarts.
+- **NGINX Ingress + NLB (not ALB)** — the AWS load balancer is a plain L4 NLB; all
+  host/path routing and TLS termination happen inside NGINX. This keeps a single load
+  balancer for every service (instead of one per `Service type=LoadBalancer`) and one
+  place to terminate TLS.
+- **cert-manager staging then prod** — deploys start on Let's Encrypt **staging** to avoid
+  burning the strict production rate limits during the frequent `apply`/`destroy` cycle,
+  and switch to **prod** once issuance is confirmed. Domain is free `nip.io` (no Route53
+  cost) for an ephemeral learning environment.
 - **Config vs. secrets split** — non-sensitive DB settings live in a `ConfigMap`
   (versioned in Git), the password comes from the ESO-synced `Secret`, and the Deployment
   assembles `DATABASE_URL` from both via `$(VAR)` expansion.
