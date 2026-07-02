@@ -1,0 +1,40 @@
+# ClusterIssuer — tells cert-manager HOW to get certificates. It is pure config
+# (a CRD instance stored in etcd), NOT a pod: the already-running cert-manager
+# controller reads it. `kubectl apply`, never Helm.
+#
+# TWO issuers on purpose:
+#   - staging: Let's Encrypt's staging CA. Certs are UNTRUSTED (browser warning),
+#     but the rate limits are huge. Use this while iterating so we never burn the
+#     production quota on a cluster we destroy every session.
+#   - prod: the real trusted CA, but strict limits (~50 certs/week per domain).
+#     Switch the Ingress to this only once staging issues cleanly.
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: sargiottofacu@gmail.com          # Let's Encrypt notifies here on expiry
+    privateKeySecretRef:
+      name: letsencrypt-staging-account-key  # cert-manager stores our ACME account key here
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx           # solve the challenge THROUGH our nginx (NLB -> nginx)
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: sargiottofacu@gmail.com
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx

@@ -1,0 +1,13 @@
+# ingress-nginx — the L7 reverse proxy that reads Ingress resources and routes
+# traffic to the right Service. Installed via Helm (see scripts/deploy.sh).
+#
+# Its LoadBalancer Service makes Kubernetes provision an AWS load balancer
+# automatically and point it at these controller pods. We never create that LB
+# by hand.
+controller:
+  service:
+    annotations:
+      # The in-tree AWS cloud provider defaults to a Classic ELB (deprecated).
+      # Ask for an NLB (L4) instead: cheaper and faster, and all the L7 routing
+      # (Host/path inspection) happens inside nginx anyway — the LB is just a pipe.
+      service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
