@@ -28,6 +28,17 @@ log() { printf '\n\033[1;36m==> %s\033[0m\n' "$1"; }
 # ---- teardown ---------------------------------------------------------------
 teardown() {
   log "Teardown (ephemeral layer only — bootstrap/ stays alive)"
+  # Uninstall ingress-nginx FIRST: deleting its LoadBalancer Service is what makes
+  # AWS delete the NLB. That NLB is not in Terraform state, so if it survives it
+  # both accrues cost AND blocks VPC/subnet deletion during terraform destroy.
+  helm uninstall ingress-nginx -n ingress-nginx 2>/dev/null || true
+  helm uninstall cert-manager  -n cert-manager  2>/dev/null || true
+  # Give AWS a moment to actually tear the NLB down before we destroy the VPC.
+  echo "Waiting for the NLB to be deprovisioned..."
+  for _ in $(seq 1 18); do
+    kubectl get svc ingress-nginx-controller -n ingress-nginx >/dev/null 2>&1 || break
+    sleep 10
+  done
   helm uninstall postgres 2>/dev/null || true
   # Helm retains the StatefulSet PVC on purpose; that PVC is a real EBS volume NOT
   # tracked by Terraform. Delete it BEFORE destroy or it becomes an orphan accruing cost.
@@ -116,6 +127,51 @@ deploy() {
   fi
   echo "Secret synced ✔"
 
+  # 2b. Ingress controller (nginx) --------------------------------------------
+  # Its LoadBalancer Service makes AWS provision an NLB automatically. --wait
+  # blocks on the controller pods (not the LB — see 2d for that).
+  log "2b. ingress-nginx (provisions the public NLB)"
+  helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx >/dev/null 2>&1 || true
+  helm repo update ingress-nginx >/dev/null
+  helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+    --namespace ingress-nginx --create-namespace --wait --timeout 5m \
+    -f kubernetes/platform/ingress-nginx/values.yaml
+
+  # 2c. cert-manager + ClusterIssuers -----------------------------------------
+  log "2c. cert-manager (crds.enabled brings the ClusterIssuer/Certificate types)"
+  helm repo add jetstack https://charts.jetstack.io >/dev/null 2>&1 || true
+  helm repo update jetstack >/dev/null
+  helm upgrade --install cert-manager jetstack/cert-manager \
+    --namespace cert-manager --create-namespace \
+    --set crds.enabled=true --wait --timeout 5m
+  # Pure config the running cert-manager reads — not a pod, hence kubectl apply.
+  kubectl apply -f kubernetes/platform/cert-manager/clusterissuer.yaml
+
+  # 2d. Resolve the NLB -> nip.io host ----------------------------------------
+  # The NLB is provisioned asynchronously: its hostname lands on the Service a bit
+  # after helm returns, and its DNS takes a further moment to resolve to an IP.
+  # nip.io maps <ip>.nip.io -> <ip>, so we build the host from the resolved IP.
+  log "2d. Resolve NLB address -> nip.io host"
+  LB_HOST=""
+  for _ in $(seq 1 30); do
+    LB_HOST="$(kubectl get svc ingress-nginx-controller -n ingress-nginx \
+      -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+    [ -n "$LB_HOST" ] && break
+    sleep 10
+  done
+  [ -n "$LB_HOST" ] || { echo "ERROR: NLB hostname never appeared on the Service" >&2; exit 1; }
+
+  LB_IP=""
+  for _ in $(seq 1 30); do
+    LB_IP="$(getent hosts "$LB_HOST" | awk '{print $1; exit}')"
+    [ -n "$LB_IP" ] && break
+    sleep 10
+  done
+  [ -n "$LB_IP" ] || { echo "ERROR: NLB DNS ($LB_HOST) did not resolve to an IP" >&2; exit 1; }
+
+  HOST="${LB_IP}.nip.io"
+  echo "Public host: https://$HOST"
+
   # 3. PostgreSQL -------------------------------------------------------------
   log "3. PostgreSQL via Helm (release MUST be named 'postgres')"
   helm repo add bitnami https://charts.bitnami.com/bitnami >/dev/null 2>&1 || true
@@ -147,16 +203,30 @@ deploy() {
   kubectl rollout status deployment/backend  --timeout=180s
   kubectl rollout status deployment/frontend --timeout=180s
 
+  # 5b. Ingress + TLS ---------------------------------------------------------
+  # Substitute the resolved nip.io host, then let cert-manager's ingress-shim see
+  # the annotation and issue the cert into the kubeplay-tls Secret automatically.
+  log "5b. Ingress + TLS (host: $HOST)"
+  sed "s|<HOST>|$HOST|g" kubernetes/apps/ingress.yaml | kubectl apply -f -
+  echo "Waiting for Let's Encrypt to issue the certificate..."
+  # The auto-created Certificate is named after the secretName (kubeplay-tls).
+  kubectl wait --for=condition=Ready certificate/kubeplay-tls --timeout=180s \
+    || kubectl describe certificate kubeplay-tls || true
+
   # 6. Verify -----------------------------------------------------------------
   log "6. Status"
   kubectl get pods
   kubectl get hpa
   cat <<EOF
 
-Deploy complete. Smoke-test the API with a port-forward (Ingress is Phase 4):
+Deploy complete. The app is live over HTTPS at:
 
-  kubectl port-forward svc/backend 8080:8080 &
-  curl localhost:8080/api/items
+  https://$HOST
+
+NOTE: we start on Let's Encrypt STAGING, so the browser shows a red
+"not private" warning — that is expected. The cert is real, just signed by an
+untrusted staging CA. Flip the annotation in kubernetes/apps/ingress.yaml to
+'letsencrypt-prod' and re-run to get a trusted 🔒.
 
 Tear everything down at the end of the session with:
 
