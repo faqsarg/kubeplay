@@ -163,7 +163,10 @@ deploy() {
 
   LB_IP=""
   for _ in $(seq 1 30); do
-    LB_IP="$(getent hosts "$LB_HOST" | awk '{print $1; exit}')"
+    # `|| true`: until DNS propagates, getent exits non-zero; under `set -o pipefail`
+    # that failure would propagate through the assignment and `set -e` would kill the
+    # script mid-loop — before we ever reach the sleep/retry. Swallow it so we retry.
+    LB_IP="$(getent hosts "$LB_HOST" | awk '{print $1; exit}' || true)"
     [ -n "$LB_IP" ] && break
     sleep 10
   done
