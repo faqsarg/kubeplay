@@ -2,7 +2,11 @@ module "networking" {
   source = "../../modules/networking"
 
   environment        = var.environment
-  cluster_name       = var.cluster_name
+  # Must match the real EKS cluster name (modules/eks names it "${environment}-eks").
+  # The in-tree AWS cloud-provider discovers LB subnets by the tag
+  # kubernetes.io/cluster/<clusterName>; a mismatch makes it reject every subnet
+  # ("could not find any suitable subnets for creating the ELB").
+  cluster_name       = "${var.environment}-eks"
   vpc_cidr           = var.vpc_cidr
   public_subnets     = var.public_subnets
   private_subnets    = var.private_subnets
