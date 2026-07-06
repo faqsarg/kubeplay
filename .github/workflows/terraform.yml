@@ -63,6 +63,10 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
       - name: Plan ${{ matrix.dir }}
         working-directory: ${{ matrix.dir }}
+        # -refresh=false: plan against stored state without reading live values, so the
+        # read-only role never needs secretsmanager:GetSecretValue (ReadOnlyAccess excludes
+        # it by design). A PR gate validates config-vs-state, not live drift — and a role
+        # any PR can assume must not be able to read secret material.
         run: |
           terraform init -input=false
-          terraform plan -input=false -lock=false -no-color
+          terraform plan -input=false -lock=false -refresh=false -no-color
