@@ -1,0 +1,68 @@
+# Infra CI — runs on PRs that touch Terraform. It only ever INSPECTS the config:
+# fmt -> validate -> plan. It never applies. `apply` stays a manual human action
+# because this project's ephemeral apply-then-destroy model means a merge-triggered
+# apply would spin up (and bill) a whole EKS cluster.
+name: Terraform
+
+on:
+  pull_request:
+    paths:
+      - "bootstrap/**"
+      - "terraform/**"
+      - ".github/workflows/terraform.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # only the plan job needs it (OIDC), but permissions are workflow-wide
+  contents: read
+
+env:
+  AWS_REGION: eu-west-1
+  TF_PLAN_ROLE_ARN: arn:aws:iam::915170001562:role/kubeplay-github-plan
+
+jobs:
+  # Formatting is a whole-repo, credential-free check — one job, recursive.
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive
+
+  # validate is per-root (each dir is its own Terraform config). -backend=false skips
+  # the S3 backend, so this needs no AWS credentials — it just type-checks the config.
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dir: [bootstrap, terraform/environments/staging]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Validate ${{ matrix.dir }}
+        working-directory: ${{ matrix.dir }}
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+  # plan needs the real backend (read state from S3) and AWS reads (refresh), so it
+  # authenticates with the read-only role. -lock=false avoids needing DynamoDB writes;
+  # a plan never applies, so skipping the lock is safe.
+  plan:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dir: [bootstrap, terraform/environments/staging]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Configure AWS credentials (read-only)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.TF_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Plan ${{ matrix.dir }}
+        working-directory: ${{ matrix.dir }}
+        run: |
+          terraform init -input=false
+          terraform plan -input=false -lock=false -no-color
