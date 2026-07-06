@@ -16,17 +16,13 @@ resource "aws_iam_openid_connect_provider" "github" {
   client_id_list = ["sts.amazonaws.com"]
 }
 
-data "aws_caller_identity" "current" {}
-
 locals {
   github_repo = "faqsarg/kubeplay"
 
-  # ECR repo ARNs built by hand (not a cross-state lookup): the repos live in the
-  # ephemeral staging state, but this durable role must not depend on it.
-  ecr_repo_arns = [
-    for name in ["staging-backend", "staging-frontend"] :
-    "arn:aws:ecr:${var.aws_region}:${data.aws_caller_identity.current.account_id}:repository/${name}"
-  ]
+  # Real references: the repos now live in this same durable layer (ecr.tf), so the
+  # role can point at their ARNs directly — no hand-built strings, no dependency on
+  # the ephemeral staging state.
+  ecr_repo_arns = [module.ecr.repository_arn, module.ecr_frontend.repository_arn]
 }
 
 # 2. The CI role — TRUST POLICY only (who may assume it). Its PERMISSIONS (what it

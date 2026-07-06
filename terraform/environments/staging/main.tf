@@ -21,16 +21,5 @@ module "eks" {
   private_subnet_ids = module.networking.private_subnet_ids
 }
 
-module "ecr" {
-  source = "../../modules/ecr"
-
-  environment     = var.environment
-  repository_name = "backend"
-}
-
-module "ecr_frontend" {
-  source = "../../modules/ecr"
-
-  environment     = var.environment
-  repository_name = "frontend"
-}
+# ECR repos moved to the durable bootstrap layer (bootstrap/ecr.tf): a registry must
+# survive cluster teardown so CI can push images with staging destroyed.
