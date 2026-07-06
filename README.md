@@ -57,7 +57,7 @@ State backend:  S3 (versioned) + DynamoDB (state locking)
 
 | Path | Purpose |
 |------|---------|
-| `bootstrap/` | One-time **durable** layer: Terraform state backend (S3 + DynamoDB) and the AWS Secrets Manager secret for Postgres. |
+| `bootstrap/` | One-time **durable** layer that outlives cluster teardown: Terraform state backend (S3 + DynamoDB), the AWS Secrets Manager secret for Postgres, the **GitHub Actions OIDC provider + CI role**, and the **ECR repositories** (a registry must survive `destroy` so CI can push images with the cluster down). |
 | `terraform/modules/networking/` | VPC, subnets, IGW, NAT, route tables, EKS subnet tags. |
 | `terraform/modules/eks/` | EKS cluster, IAM roles, SPOT node group, OIDC provider for IRSA. |
 | `terraform/modules/ecr/` | ECR repositories (immutable tags, scan-on-push, keep-last-10 lifecycle). |
