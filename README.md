@@ -57,7 +57,7 @@ State backend:  S3 (versioned) + DynamoDB (state locking)
 
 | Path | Purpose |
 |------|---------|
-| `bootstrap/` | One-time **durable** layer: Terraform state backend (S3 + DynamoDB) and the AWS Secrets Manager secret for Postgres. |
+| `bootstrap/` | One-time **durable** layer that outlives cluster teardown: Terraform state backend (S3 + DynamoDB), the AWS Secrets Manager secret for Postgres, the **GitHub Actions OIDC provider + CI role**, and the **ECR repositories** (a registry must survive `destroy` so CI can push images with the cluster down). |
 | `terraform/modules/networking/` | VPC, subnets, IGW, NAT, route tables, EKS subnet tags. |
 | `terraform/modules/eks/` | EKS cluster, IAM roles, SPOT node group, OIDC provider for IRSA. |
 | `terraform/modules/ecr/` | ECR repositories (immutable tags, scan-on-push, keep-last-10 lifecycle). |
@@ -155,6 +155,25 @@ Internet ──► AWS NLB (L4) ──► NGINX Ingress Controller (L7) ──�
 At teardown the Ingress controller is uninstalled **before** `terraform destroy` so the
 NLB (an AWS resource not tracked in Terraform state) is deprovisioned and can't block VPC
 deletion.
+
+---
+
+## Continuous integration (GitHub Actions)
+
+CI authenticates to AWS with **GitHub OIDC** — short-lived tokens exchanged for temporary
+credentials, no static keys stored as repo secrets. Each pipeline assumes a role whose
+trust policy is scoped by the token's `sub` claim to exactly the workflow that should use
+it, and whose permissions are least-privilege for its job. The roles live in the durable
+`bootstrap/` layer so CI keeps working with the cluster torn down.
+
+| Workflow | Trigger | Role | What it does |
+|----------|---------|------|--------------|
+| `.github/workflows/ci.yml` | pull_request | `kubeplay-github-ci` (ECR push) | Build + `go vet`/`test`, push both images to ECR tagged with the commit SHA. |
+| `.github/workflows/terraform.yml` | PR touching `terraform/**`, `bootstrap/**` | `kubeplay-github-plan` (`ReadOnlyAccess`) | `fmt` + `validate` (no creds) and `plan` (read-only). **Never applies** — a merge-triggered apply would spin a billable cluster in this ephemeral model. |
+
+Images are built once and promoted by immutable SHA tag (never `latest`); `apply` stays a
+deliberate manual action. Deploy workflows (staging on merge, production behind an approval
+gate) are the next step.
 
 ---
 

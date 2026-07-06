@@ -1,0 +1,73 @@
+# CI — runs on every PR. Builds both app images and pushes them to ECR, tagged
+# with the commit SHA. Authenticates to AWS via GitHub OIDC (no static keys):
+# the kubeplay-github-ci role (bootstrap/github_oidc.tf) trusts tokens from this repo.
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:   # lets us trigger a run manually from the Actions tab
+
+# OIDC needs id-token:write so GitHub will mint the JWT we present to AWS STS.
+# contents:read is the default least-privilege for checkout.
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: eu-west-1
+  AWS_ROLE_ARN: arn:aws:iam::915170001562:role/kubeplay-github-ci
+  ECR_REGISTRY: 915170001562.dkr.ecr.eu-west-1.amazonaws.com
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/backend/go.mod   # single source of truth for the Go version
+
+      # Static checks + tests. No tests exist yet, so `go test` exits 0 ("no test files").
+      - name: Vet and test
+        working-directory: apps/backend
+        run: |
+          go vet ./...
+          go test ./...
+
+      # Exchanges the GitHub OIDC token for temporary AWS credentials.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Uses those creds to `docker login` against our private registry.
+      - name: Log in to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push backend
+        run: |
+          IMAGE=${{ env.ECR_REGISTRY }}/staging-backend:${{ github.sha }}
+          docker build -t "$IMAGE" apps/backend
+          docker push "$IMAGE"
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push frontend
+        run: |
+          IMAGE=${{ env.ECR_REGISTRY }}/staging-frontend:${{ github.sha }}
+          docker build -t "$IMAGE" apps/frontend
+          docker push "$IMAGE"

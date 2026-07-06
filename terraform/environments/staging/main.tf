@@ -1,7 +1,7 @@
 module "networking" {
   source = "../../modules/networking"
 
-  environment        = var.environment
+  environment = var.environment
   # Must match the real EKS cluster name (modules/eks names it "${environment}-eks").
   # The in-tree AWS cloud-provider discovers LB subnets by the tag
   # kubernetes.io/cluster/<clusterName>; a mismatch makes it reject every subnet
@@ -21,16 +21,5 @@ module "eks" {
   private_subnet_ids = module.networking.private_subnet_ids
 }
 
-module "ecr" {
-  source = "../../modules/ecr"
-
-  environment     = var.environment
-  repository_name = "backend"
-}
-
-module "ecr_frontend" {
-  source = "../../modules/ecr"
-
-  environment     = var.environment
-  repository_name = "frontend"
-}
+# ECR repos moved to the durable bootstrap layer (bootstrap/ecr.tf): a registry must
+# survive cluster teardown so CI can push images with staging destroyed.
