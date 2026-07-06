@@ -158,6 +158,25 @@ deletion.
 
 ---
 
+## Continuous integration (GitHub Actions)
+
+CI authenticates to AWS with **GitHub OIDC** — short-lived tokens exchanged for temporary
+credentials, no static keys stored as repo secrets. Each pipeline assumes a role whose
+trust policy is scoped by the token's `sub` claim to exactly the workflow that should use
+it, and whose permissions are least-privilege for its job. The roles live in the durable
+`bootstrap/` layer so CI keeps working with the cluster torn down.
+
+| Workflow | Trigger | Role | What it does |
+|----------|---------|------|--------------|
+| `.github/workflows/ci.yml` | pull_request | `kubeplay-github-ci` (ECR push) | Build + `go vet`/`test`, push both images to ECR tagged with the commit SHA. |
+| `.github/workflows/terraform.yml` | PR touching `terraform/**`, `bootstrap/**` | `kubeplay-github-plan` (`ReadOnlyAccess`) | `fmt` + `validate` (no creds) and `plan` (read-only). **Never applies** — a merge-triggered apply would spin a billable cluster in this ephemeral model. |
+
+Images are built once and promoted by immutable SHA tag (never `latest`); `apply` stays a
+deliberate manual action. Deploy workflows (staging on merge, production behind an approval
+gate) are the next step.
+
+---
+
 ## Usage
 
 **Prerequisites:** Terraform `>= 1.5`, AWS CLI configured, `kubectl`.
