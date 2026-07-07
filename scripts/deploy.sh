@@ -9,7 +9,8 @@
 #   ./scripts/deploy.sh            # full deploy (terraform + cluster workloads)
 #   ./scripts/deploy.sh teardown   # tear down ephemeral layer (bootstrap is NEVER touched)
 #
-# Requires locally: terraform, aws, kubectl, helm, docker (+ valid AWS credentials).
+# Requires locally: terraform, aws, kubectl, helm (+ valid AWS credentials).
+# (No docker: images are built by CI, not here — the cluster pulls them from ECR.)
 set -euo pipefail
 
 # ---- config -----------------------------------------------------------------
@@ -61,13 +62,6 @@ deploy() {
   log "0c. Point kubectl at the new cluster"
   aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER"
   kubectl get nodes
-
-  log "0d. Log docker in to ECR"
-  aws ecr get-login-password --region "$REGION" \
-    | docker login --username AWS --password-stdin "$ECR"
-
-  SHA="$(git rev-parse --short HEAD)"
-  echo "Image tag (git SHA): $SHA"
 
   # 1. metrics-server ---------------------------------------------------------
   log "1. metrics-server (HPA needs CPU metrics)"
@@ -184,32 +178,31 @@ deploy() {
     -f kubernetes/apps/postgres/values.yaml
   kubectl rollout status statefulset/postgres-postgresql --timeout=300s
 
-  # 4. Build + push images ----------------------------------------------------
-  log "4. Build + push images to ECR (tag: $SHA)"
-  docker build -t "$ECR/staging-backend:$SHA"  apps/backend
-  docker push      "$ECR/staging-backend:$SHA"
-  docker build -t "$ECR/staging-frontend:$SHA" apps/frontend
-  docker push      "$ECR/staging-frontend:$SHA"
+  # 3b. ArgoCD ----------------------------------------------------------------
+  # The bootstrap paradox: Argo deploys our apps declaratively from git, but Argo
+  # itself can't self-install — so deploy.sh (the imperative layer) installs it once.
+  # From here on, Argo owns backend/frontend; deploy.sh only bootstraps the platform.
+  log "3b. ArgoCD (GitOps controller — will reconcile the apps from git)"
+  helm repo add argo https://argoproj.github.io/argo-helm >/dev/null 2>&1 || true
+  helm repo update argo >/dev/null
+  helm upgrade --install argocd argo/argo-cd \
+    --namespace argocd --create-namespace --wait --timeout 5m
 
-  # 5. Apply app manifests (substitute the image placeholder) -----------------
-  log "5. Apply backend + frontend manifests"
-  kubectl apply -f kubernetes/apps/backend/configmap.yaml
-  sed "s|<ECR_REPO_URL>:<SHA>|$ECR/staging-backend:$SHA|g" \
-    kubernetes/apps/backend/deployment.yaml | kubectl apply -f -
-  kubectl apply -f kubernetes/apps/backend/service.yaml
-  kubectl apply -f kubernetes/apps/backend/hpa.yaml
+  # Register the Application CRs (one-time bootstrap). From here Argo watches git
+  # and reconciles backend/frontend itself — no kubectl apply of the apps needed.
+  kubectl apply -f kubernetes/argocd/
 
-  sed "s|<ECR_REPO_URL>:<SHA>|$ECR/staging-frontend:$SHA|g" \
-    kubernetes/apps/frontend/deployment.yaml | kubectl apply -f -
-  kubectl apply -f kubernetes/apps/frontend/service.yaml
+  # 4. Apps are owned by Argo now ---------------------------------------------
+  # Building/pushing images and deploying backend/frontend is no longer done here.
+  # The CD pipeline (.github/workflows/deploy-staging.yml) builds + pushes on merge
+  # to main and commits the image tag; ArgoCD (installed in 3b) reconciles it from
+  # git. ECR is durable, so main's kustomization always pins a real, existing tag —
+  # Argo pulls and rolls out on its own, a couple of minutes after this script ends.
 
-  kubectl rollout status deployment/backend  --timeout=180s
-  kubectl rollout status deployment/frontend --timeout=180s
-
-  # 5b. Ingress + TLS ---------------------------------------------------------
+  # 5. Ingress + TLS ----------------------------------------------------------
   # Substitute the resolved nip.io host, then let cert-manager's ingress-shim see
   # the annotation and issue the cert into the kubeplay-tls Secret automatically.
-  log "5b. Ingress + TLS (host: $HOST)"
+  log "5. Ingress + TLS (host: $HOST)"
   sed "s|<HOST>|$HOST|g" kubernetes/apps/ingress.yaml | kubectl apply -f -
   echo "Waiting for Let's Encrypt to issue the certificate..."
   # The auto-created Certificate is named after the secretName (kubeplay-tls).

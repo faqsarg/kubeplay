@@ -1,0 +1,67 @@
+# CD — runs on every push to main (i.e. after a PR merge). Builds the authoritative
+# images tagged with the main commit SHA, bumps the kustomize image tags, and commits
+# them back to main. That commit is the desired state Argo reconciles into the cluster.
+#
+# Note the division of labour: this workflow NEVER talks to the cluster. It only pushes
+# to ECR and commits to git. ArgoCD (running inside the cluster) does the actual deploy.
+name: Deploy to staging
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write   # OIDC -> AWS STS, to push images to ECR
+  contents: write   # to commit the bumped image tags back to main
+
+env:
+  AWS_REGION: eu-west-1
+  # Same role as CI: with GitOps this pipeline only needs ECR push — no cluster access.
+  AWS_ROLE_ARN: arn:aws:iam::915170001562:role/kubeplay-github-ci
+  ECR_REGISTRY: 915170001562.dkr.ecr.eu-west-1.amazonaws.com
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push images
+        run: |
+          for app in backend frontend; do
+            IMAGE="${ECR_REGISTRY}/staging-${app}:${GITHUB_SHA}"
+            docker build -t "$IMAGE" "apps/${app}"
+            docker push "$IMAGE"
+          done
+
+      # kustomize isn't preinstalled on the runner; pin a version for reproducibility.
+      - name: Set up kustomize
+        run: |
+          curl -sSfL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz" \
+            | tar xz
+          sudo mv kustomize /usr/local/bin/
+
+      # The whole point: rewrite ONLY the newTag line in each kustomization.yaml.
+      - name: Bump image tags
+        run: |
+          (cd kubernetes/apps/backend  && kustomize edit set image "backend=${ECR_REGISTRY}/staging-backend:${GITHUB_SHA}")
+          (cd kubernetes/apps/frontend && kustomize edit set image "frontend=${ECR_REGISTRY}/staging-frontend:${GITHUB_SHA}")
+
+      # Commit the bump back to main. Pushes made with GITHUB_TOKEN don't re-trigger
+      # workflows (GitHub blocks the recursion); [skip ci] is belt-and-suspenders.
+      - name: Commit and push new tags
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add kubernetes/apps/backend/kustomization.yaml kubernetes/apps/frontend/kustomization.yaml
+          git commit -m "deploy: staging ${GITHUB_SHA} [skip ci]" || { echo "no image change to deploy"; exit 0; }
+          git push

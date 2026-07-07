@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: backend
+  # Application objects themselves live in Argo's namespace, not where the app runs.
+  namespace: argocd
+spec:
+  project: default
+
+  # WHAT to deploy: this repo, this branch, this path. Argo auto-detects the
+  # kustomization.yaml here and runs `kustomize build` to render the manifests.
+  source:
+    repoURL: https://github.com/faqsarg/kubeplay.git
+    targetRevision: main
+    path: kubernetes/apps/backend
+
+  # WHERE to deploy: the same cluster Argo runs in (the in-cluster API), namespace default.
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+
+  # HOW to keep it in sync — the reconciliation loop you learned about:
+  syncPolicy:
+    automated:
+      prune: true      # delete cluster resources once they're removed from git
+      selfHeal: true   # revert any manual drift back to git's desired state

@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: backend
-          image: <ECR_REPO_URL>:<SHA>   # placeholder — replaced at deploy time
+          image: backend   # abstract name; kustomization.yaml binds it to the real ECR repo + tag
           ports:
             - containerPort: 8080
           env:

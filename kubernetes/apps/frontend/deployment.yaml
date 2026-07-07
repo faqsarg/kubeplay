@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: <ECR_REPO_URL>:<SHA>   # placeholder — replaced at deploy time
+          image: frontend   # abstract name; kustomization.yaml binds it to the real ECR repo + tag
           ports:
             - containerPort: 80
           resources:
