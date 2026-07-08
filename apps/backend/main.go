@@ -11,6 +11,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// appVersion is the single source of truth for the running app version, surfaced
+// by both /health (internal liveness) and /api/version (public).
+const appVersion = "1.1.0"
+
 var db *pgxpool.Pool
 
 type Item struct {
@@ -35,8 +39,14 @@ func ensureSchema(ctx context.Context) error {
 func health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":  "ok",
-		"version": "1.0.0",
+		"version": appVersion,
 	})
+}
+
+// version is a public endpoint (routed via the /api prefix) that reports the
+// running app version — handy to confirm at a glance which build is live.
+func version(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"version": appVersion})
 }
 
 // ready is the readiness check: it verifies the pod can actually serve traffic
@@ -138,6 +148,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", health)
 	mux.HandleFunc("GET /ready", ready)
+	mux.HandleFunc("GET /api/version", version)
 	mux.HandleFunc("GET /api/items", listItems)
 	mux.HandleFunc("POST /api/items", createItem)
 
