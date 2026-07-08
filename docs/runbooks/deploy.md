@@ -1,189 +1,252 @@
-# Runbook — Application deploy (Phase 3)
+# Runbook — Bring the app up on a fresh staging cluster (GitOps)
 
 Project strategy: **apply-then-destroy**. The cluster is destroyed at the end of each
-session to avoid paying for the EKS control plane. This runbook is the procedure to bring
-the app up **from scratch on a freshly created cluster**, with nothing kept in memory.
+session to avoid paying for the EKS control plane. This runbook brings the platform up
+**from scratch on a freshly created cluster**, with nothing kept in memory.
 
-> Order matters. Each step depends on the previous one existing (see the "why" notes).
+Since Phase 5 the app is deployed with **GitOps (ArgoCD)**, not by pushing manifests from
+a workstation. The split to keep in mind:
+
+- **`scripts/deploy.sh`** (the *imperative* layer) bootstraps the **platform**: cluster,
+  storage, secrets, ingress, Postgres, and ArgoCD itself. Run it once per fresh cluster.
+- **ArgoCD** (the *declarative* layer) then owns the **apps** (backend/frontend). It reads
+  the desired state from `main` and reconciles it into the cluster. Nobody `kubectl apply`s
+  the apps by hand anymore.
+- **CI/CD** (`.github/workflows/deploy-staging.yml`) builds+pushes images on merge to `main`
+  and commits the new image tag into `kubernetes/apps/*/kustomization.yaml`. **That commit
+  is the deploy** — Argo picks it up on its own.
+
+> The fast path is a single command: `./scripts/deploy.sh`. The rest of this document is
+> what that script does, step by step, and **why** — read it to understand or debug a run.
 
 ---
 
 ## 0. Prerequisites
 
+Requires locally: `terraform`, `aws`, `kubectl`, `helm` (+ valid AWS credentials).
+No `docker` is needed — images are built by CI, not here; the cluster pulls them from ECR.
+
 ```bash
-# Durable layer (one-time; survives destroy): S3 backend + AWS Secrets Manager secret
-# + ESO IRSA prerequisites. Re-run only after changing bootstrap/ (e.g. the random provider).
-terraform -chdir=bootstrap init
-terraform -chdir=bootstrap apply
+# One command does everything below (idempotent; safe to re-run):
+./scripts/deploy.sh
 
-# Cluster up (creates VPC, EKS, ECR, the eso_irsa role)
-cd terraform/environments/staging && terraform apply
-
-# Point kubeconfig at the new cluster
-aws eks update-kubeconfig --region eu-west-1 --name staging-eks
-
-# Verify access
-kubectl get nodes
+# Tear the ephemeral layer down at the end of the session (bootstrap/ is NEVER touched):
+./scripts/deploy.sh teardown
 ```
 
-Variables used below (adjust the account id if it changes):
+The durable layer (S3 state backend + the AWS Secrets Manager secret + the GitHub OIDC
+provider/CI role + ECR repos) lives in `bootstrap/` and **survives destroy**. `deploy.sh`
+re-applies it first as a no-op; only re-run it by hand after changing `bootstrap/`.
+
+---
+
+## 1. Infrastructure  *(the slow/expensive step)*
 
 ```bash
-export AWS_REGION=eu-west-1
-export ECR=915170001562.dkr.ecr.eu-west-1.amazonaws.com
-export SHA=$(git rev-parse --short HEAD)
+terraform -chdir=bootstrap init && terraform -chdir=bootstrap apply           # durable; no-op if applied
+terraform -chdir=terraform/environments/staging init                          # ephemeral cluster layer
+terraform -chdir=terraform/environments/staging apply                         # creates VPC, EKS, ECR, eso_irsa role, EBS CSI addon
 
-# Log in to ECR so we can push
-aws ecr get-login-password --region $AWS_REGION \
-  | docker login --username AWS --password-stdin $ECR
+aws eks update-kubeconfig --region eu-west-1 --name staging-eks
+kubectl get nodes                                                             # verify access
 ```
 
 ---
 
-## 1. metrics-server  *(so the HPA has CPU metrics)*
+## 2. metrics-server  *(so the HPA has CPU metrics)*
 
-EKS does **not** ship metrics-server by default. Without it, the backend HPA stays at
-`<unknown>/70%` and never scales.
+EKS does **not** ship metrics-server. Without it the backend HPA stays at `<unknown>/70%`
+and never scales.
 
 ```bash
 kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+kubectl rollout status deployment/metrics-server -n kube-system
 ```
 
 ---
 
-## 2. Secret `postgres-credentials` via ESO  *(BEFORE Postgres and the backend)*
+## 3. Storage — make gp3 the default StorageClass
 
-The Secret is **not** created by hand. The source of truth is AWS Secrets Manager
-(`kubeplay/staging/postgres`, created in the `bootstrap/` Terraform layer); the External
-Secrets Operator (ESO) reads it and materializes a native K8s Secret named
-`postgres-credentials` in the `default` namespace. Two consumers read that Secret: the
-Postgres chart (`existingSecret`) and the backend Deployment (`secretKeyRef`). If it does
-not exist, both pods get stuck in `CreateContainerConfigError`.
+The `aws-ebs-csi-driver` addon is installed by Terraform. Make **gp3** the default
+StorageClass so Postgres' PVC binds to a real EBS volume, and demote EKS's default **gp2**
+(a dead in-tree provisioner) — two defaults would leave the PVC unscheduled.
 
-ESO authenticates to AWS via IRSA — no static keys. The `eso_irsa` role (least privilege:
-`GetSecretValue` on that one secret) is created by `terraform apply`; grab its ARN:
+```bash
+kubectl apply -f kubernetes/platform/storage/gp3-storageclass.yaml
+kubectl patch storageclass gp2 \
+  -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}'
+```
+
+---
+
+## 4. Secret `postgres-credentials` via ESO  *(BEFORE Postgres and the backend)*
+
+The Secret is **not** created by hand. Source of truth is AWS Secrets Manager
+(`kubeplay/staging/postgres`, created in `bootstrap/`); the External Secrets Operator (ESO)
+reads it via IRSA — no static keys — and materializes a native K8s Secret named
+`postgres-credentials` in `default`. Two consumers read it: the Postgres chart
+(`existingSecret`) and the backend Deployment (`secretKeyRef`). If it does not exist, both
+pods get stuck in `CreateContainerConfigError`.
+
+The `eso_irsa` role (least privilege: `GetSecretValue` on that one secret) is created by
+`terraform apply`. ESO's ServiceAccount **must** be `external-secrets`/`external-secrets`
+— that is exactly what the role's trust policy pins via the OIDC `sub` claim.
 
 ```bash
 ROLE_ARN=$(terraform -chdir=terraform/environments/staging output -raw eso_irsa_role_arn)
-```
 
-Install ESO into its own namespace, annotating its ServiceAccount with the role ARN. The
-SA name+namespace MUST be `external-secrets`/`external-secrets` — that is exactly what the
-role's trust policy pins via the OIDC `sub` claim.
-
-```bash
-helm repo add external-secrets https://charts.external-secrets.io
-helm repo update
-
-helm install external-secrets external-secrets/external-secrets \
-  --namespace external-secrets --create-namespace \
+helm repo add external-secrets https://charts.external-secrets.io && helm repo update
+helm upgrade --install external-secrets external-secrets/external-secrets \
+  --namespace external-secrets --create-namespace --wait \
   --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$ROLE_ARN"
 
-# wait for the operator (and its CRDs) to be ready
-kubectl rollout status deployment/external-secrets -n external-secrets
-```
+# The validating webhook must have live endpoints before a (Cluster)SecretStore can be
+# created, else: "no endpoints available for service external-secrets-webhook".
+kubectl wait --for=condition=Available deployment --all -n external-secrets --timeout=180s
 
-Apply the connection config + the recipe, then confirm ESO created the Secret:
-
-```bash
 kubectl apply -f kubernetes/apps/eso/secretstore.yaml      # ClusterSecretStore (cluster-scoped)
 kubectl apply -f kubernetes/apps/eso/externalsecret.yaml   # ExternalSecret in default
 
-# the ExternalSecret should report SecretSynced; the Secret must exist BEFORE Postgres boots
-kubectl get externalsecret postgres-credentials -n default
+# The ExternalSecret should report SecretSynced; the Secret must exist BEFORE Postgres boots.
 kubectl get secret postgres-credentials -n default
 ```
 
-- `password` → app user `kubeplay` (the backend's `DATABASE_URL` and the chart's `userPasswordKey`)
+- `password` → app user `kubeplay` (backend's `DATABASE_URL` and the chart's `userPasswordKey`)
 - `postgres-password` → `postgres` superuser (chart-internal only)
 
 ---
 
-## 3. PostgreSQL via Helm  *(before the backend: the backend connects to it)*
+## 5. ingress-nginx  *(provisions the public NLB)*
 
-The release **must** be named `postgres` → it generates the `postgres-postgresql` Service,
-which is exactly the host hardcoded in the backend's `DATABASE_URL`.
+Its `LoadBalancer` Service makes AWS provision an NLB automatically. `--wait` blocks on the
+controller pods (not the LB — its hostname lands on the Service a bit later).
 
 ```bash
-helm repo add bitnami https://charts.bitnami.com/bitnami
-helm repo update
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx && helm repo update
+helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+  --namespace ingress-nginx --create-namespace --wait \
+  -f kubernetes/platform/ingress-nginx/values.yaml
+```
 
-# chart 16.7.27 → PostgreSQL 17.6 (newest image still on bitnamilegacy; see values.yaml).
-# Pin the version: the latest chart defaults to a broken bitnami/postgresql:latest.
-helm install postgres bitnami/postgresql \
-  --version 16.7.27 \
-  -f kubernetes/apps/postgres/values.yaml
+The public host is derived from the NLB's resolved IP as `<ip>.nip.io` (nip.io maps
+`<ip>.nip.io` → `<ip>`, so no real DNS is needed for staging). `deploy.sh` resolves it
+automatically and substitutes it into the Ingress in step 8.
 
-# wait for the pod to become Ready
+---
+
+## 6. cert-manager + ClusterIssuer
+
+```bash
+helm repo add jetstack https://charts.jetstack.io && helm repo update
+helm upgrade --install cert-manager jetstack/cert-manager \
+  --namespace cert-manager --create-namespace --set crds.enabled=true --wait
+
+kubectl apply -f kubernetes/platform/cert-manager/clusterissuer.yaml   # config the running cert-manager reads
+```
+
+---
+
+## 7. PostgreSQL via Helm  *(before the apps sync: the backend connects to it)*
+
+The release **must** be named `postgres` → it generates the `postgres-postgresql` Service,
+the host hardcoded in the backend's `DATABASE_URL`.
+
+```bash
+helm repo add bitnami https://charts.bitnami.com/bitnami && helm repo update
+# chart 16.7.27 → PostgreSQL 17.6. Pin the version: the latest chart defaults to a broken
+# bitnami/postgresql:latest.
+helm upgrade --install postgres bitnami/postgresql \
+  --version 16.7.27 -f kubernetes/apps/postgres/values.yaml
 kubectl rollout status statefulset/postgres-postgresql
 ```
 
 ---
 
-## 4. Build + push images to ECR
+## 8. ArgoCD — install + register the Applications  *(the GitOps handoff)*
 
-One repo per image: `staging-backend` and `staging-frontend`.
+**The bootstrap paradox:** Argo deploys our apps declaratively from git, but Argo itself
+can't self-install — so the imperative layer installs it once. From here on Argo owns
+backend/frontend; `deploy.sh` only bootstraps the platform.
 
 ```bash
-# Backend
-docker build -t $ECR/staging-backend:$SHA apps/backend
-docker push $ECR/staging-backend:$SHA
+helm repo add argo https://argoproj.github.io/argo-helm && helm repo update
+helm upgrade --install argocd argo/argo-cd --namespace argocd --create-namespace --wait
 
-# Frontend
-docker build -t $ECR/staging-frontend:$SHA apps/frontend
-docker push $ECR/staging-frontend:$SHA
+# Register the Application CRs (one-time). Each points at repoURL=this repo,
+# targetRevision=main, path=kubernetes/apps/<app>, with automated sync (prune + selfHeal).
+kubectl apply -f kubernetes/argocd/
 ```
+
+From this point **nobody applies the apps by hand.** Argo detects `main`, runs
+`kustomize build` on each app path, and syncs. Because CI has already committed a real,
+existing image tag into each `kustomization.yaml`, the pods pull and roll out on their own
+a couple of minutes after the Applications are registered.
+
+### Verify the GitOps loop
+
+```bash
+kubectl get applications -n argocd                 # both should reach Synced / Healthy
+kubectl get pods -n default                         # backend, frontend, postgres Running/Ready
+kubectl get pod -l app=backend -n default \
+  -o jsonpath='{.items[0].spec.containers[0].image}'   # should be staging-backend:<main SHA>
+```
+
+`selfHeal: true` reverts any manual drift back to git's state; `prune: true` deletes
+resources once they're removed from git. The deploy is now **a commit to `main`**, nothing
+more.
 
 ---
 
-## 5. Apply manifests (with the image substituted)
+## 9. Ingress + TLS
 
-The manifests use `image: <ECR_REPO_URL>:<SHA>` as a placeholder. Until CI/CD exists
-(Phase 5), substitute it by hand with `sed` and apply via stdin:
+`deploy.sh` substitutes the resolved `<HOST>` (the nip.io host from step 5) into the
+Ingress, then cert-manager's ingress-shim issues the cert into the `kubeplay-tls` Secret.
 
 ```bash
-# Backend (Deployment + Service + HPA)
-sed "s|<ECR_REPO_URL>:<SHA>|$ECR/staging-backend:$SHA|g" \
-  kubernetes/apps/backend/deployment.yaml | kubectl apply -f -
-kubectl apply -f kubernetes/apps/backend/service.yaml
-kubectl apply -f kubernetes/apps/backend/hpa.yaml
-
-# Frontend (Deployment + Service)
-sed "s|<ECR_REPO_URL>:<SHA>|$ECR/staging-frontend:$SHA|g" \
-  kubernetes/apps/frontend/deployment.yaml | kubectl apply -f -
-kubectl apply -f kubernetes/apps/frontend/service.yaml
+sed "s|<HOST>|$HOST|g" kubernetes/apps/ingress.yaml | kubectl apply -f -
+kubectl wait --for=condition=Ready certificate/kubeplay-tls --timeout=180s
 ```
+
+> The app comes up on Let's Encrypt **staging** by default → the browser shows a red "not
+> private" warning (the cert is real, just signed by an untrusted staging CA). Flip the
+> annotation in `kubernetes/apps/ingress.yaml` to `letsencrypt-prod` and re-run for a
+> trusted 🔒.
 
 ---
 
-## 6. Verify
+## 10. Verify + smoke test
 
 ```bash
-kubectl get pods                 # backend, frontend and postgres Running/Ready
+kubectl get pods                 # backend, frontend, postgres Running/Ready
 kubectl get hpa                  # backend TARGETS should not be <unknown>
-kubectl logs deploy/backend      # should connect to Postgres without errors
+kubectl logs deploy/backend      # connects to Postgres without errors
 
-# internal smoke test (before we have an Ingress)
+# Public: hit the app over HTTPS at https://<HOST> (from step 5).
+# Internal (no ingress): port-forward and curl the API directly.
 kubectl port-forward svc/backend 8080:8080 &
 curl localhost:8080/api/items
 ```
 
-> Public access (ALB + Ingress + DNS) and the `/api/*`→backend, `/`→frontend routing
-> belong to **Phase 4**. Until then, test with `port-forward`.
-
 ---
 
-## Teardown (at the end of the session)
+## Teardown  *(at the end of the session)*
 
 ```bash
-helm uninstall postgres
-# Helm does NOT delete the StatefulSet's PVC (it retains it on purpose). That PVC is backed
-# by a real EBS volume that Terraform does NOT know about (the EBS CSI driver created it,
-# not Terraform). If you skip this, you leave an ORPHAN EBS volume accruing cost after destroy.
-kubectl delete pvc -l app.kubernetes.io/instance=postgres
-
-cd terraform/environments/staging && terraform destroy
+./scripts/deploy.sh teardown
 ```
 
-> The Secret and the manifests live in the cluster: they go away with `terraform destroy`.
-> That is why they must be recreated (steps 2–5) every new session.
+What it does, and why the order matters:
+
+1. `helm uninstall ingress-nginx` **first** — deleting its LoadBalancer Service is what makes
+   AWS delete the NLB. That NLB is **not** in Terraform state, so if it survives it both
+   accrues cost **and** blocks VPC/subnet deletion during `terraform destroy`.
+2. `helm uninstall cert-manager`.
+3. `helm uninstall postgres`, then `kubectl delete pvc -l app.kubernetes.io/instance=postgres`.
+   Helm retains the StatefulSet's PVC on purpose; that PVC is a real EBS volume **not** tracked
+   by Terraform. Delete it before destroy or it becomes an orphan accruing cost.
+4. `terraform -chdir=terraform/environments/staging destroy`.
+
+> The Secret, the ArgoCD install, and everything else in the cluster go away with
+> `terraform destroy`. `bootstrap/` (S3 state + AWS secret + OIDC/CI role + ECR) is
+> intentionally left untouched, so ECR keeps the images across sessions.
+```
