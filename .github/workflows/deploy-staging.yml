@@ -9,6 +9,12 @@ name: Deploy to staging
 on:
   push:
     branches: [main]
+    # Only rebuild when application source changes. Docs/infra/manifest-only commits
+    # don't produce a new image, so triggering a build+tag-bump on them just churns
+    # ECR and forces a pointless Argo redeploy of identical code. Manifest changes
+    # (kubernetes/apps/**) are reconciled by Argo straight from git — no rebuild needed.
+    paths:
+      - 'apps/**'
 
 permissions:
   id-token: write   # OIDC -> AWS STS, to push images to ECR
