@@ -3,13 +3,13 @@ kind: Kustomization
 
 # The full frontend app (no ConfigMap/HPA — it's a static nginx).
 resources:
-  - deployment.yaml
-  - service.yaml
+- deployment.yaml
+- service.yaml
 
 # The ONLY line that changes per release (see backend/kustomization.yaml for the
 # full rationale). CI updates newTag on every merge to main via:
 #   kustomize edit set image frontend=<repo>:<sha>
 images:
-  - name: frontend
-    newName: 915170001562.dkr.ecr.eu-west-1.amazonaws.com/staging-frontend
-    newTag: latest   # seeded on first Argo bootstrap; then owned by CI
+- name: frontend
+  newName: 915170001562.dkr.ecr.eu-west-1.amazonaws.com/staging-frontend
+  newTag: 7b9feeea8a256e73d338fa1314834deddccffbdc
