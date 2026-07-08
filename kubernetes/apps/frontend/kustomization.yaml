@@ -12,4 +12,4 @@ resources:
 images:
 - name: frontend
   newName: 915170001562.dkr.ecr.eu-west-1.amazonaws.com/staging-frontend
-  newTag: 7b9feeea8a256e73d338fa1314834deddccffbdc
+  newTag: 3072aa1cb3ba86072e1af2576a1edcd2f5c2e5a2
