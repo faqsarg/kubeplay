@@ -13,7 +13,7 @@ import (
 
 // appVersion is the single source of truth for the running app version, surfaced
 // by both /health (internal liveness) and /api/version (public).
-const appVersion = "1.1.0"
+const appVersion = "1.2.0"
 
 var db *pgxpool.Pool
 
