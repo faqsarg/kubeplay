@@ -31,3 +31,35 @@ resource "aws_secretsmanager_secret_version" "postgres" {
     postgres-password = random_password.postgres_admin.result # the "postgres" superuser
   })
 }
+
+# --- Production credentials -------------------------------------------------
+# A SEPARATE secret with its OWN passwords: production must be isolated from
+# staging even at the credential level (a leaked staging password must not open
+# the prod DB). Same shape/keys as staging so the same values.yaml + ESO pattern
+# reuse cleanly — only the namespace and the Secrets Manager key differ.
+resource "random_password" "postgres_prod" {
+  length  = 24
+  special = false
+}
+
+resource "random_password" "postgres_admin_prod" {
+  length  = 24
+  special = false
+}
+
+resource "aws_secretsmanager_secret" "postgres_prod" {
+  name = "kubeplay/production/postgres"
+
+  tags = {
+    Project = "cloud-platform"
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "postgres_prod" {
+  secret_id = aws_secretsmanager_secret.postgres_prod.id
+  secret_string = jsonencode({
+    username          = "kubeplay"
+    password          = random_password.postgres_prod.result
+    postgres-password = random_password.postgres_admin_prod.result
+  })
+}

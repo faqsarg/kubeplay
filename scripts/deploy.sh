@@ -6,8 +6,13 @@
 # when nothing changed). This script is the seed of the Phase 5 CI/CD pipeline.
 #
 # Usage:
-#   ./scripts/deploy.sh            # full deploy (terraform + cluster workloads)
-#   ./scripts/deploy.sh teardown   # tear down ephemeral layer (bootstrap is NEVER touched)
+#   ./scripts/deploy.sh              # deploy staging only (lean default for study sessions)
+#   ./scripts/deploy.sh --with-prod  # also provision the `production` namespace + its stack
+#   ./scripts/deploy.sh teardown     # tear down ephemeral layer (bootstrap is NEVER touched)
+#
+# production is opt-in: a normal session runs one env; --with-prod brings up the second
+# (own namespace, Postgres, ESO secret, and Argo apps) only when demoing a release/promotion.
+# teardown always cleans BOTH envs regardless of the flag, so nothing is ever orphaned.
 #
 # Requires locally: terraform, aws, kubectl, helm (+ valid AWS credentials).
 # (No docker: images are built by CI, not here — the cluster pulls them from ECR.)
@@ -44,8 +49,48 @@ teardown() {
   # Helm retains the StatefulSet PVC on purpose; that PVC is a real EBS volume NOT
   # tracked by Terraform. Delete it BEFORE destroy or it becomes an orphan accruing cost.
   kubectl delete pvc -l app.kubernetes.io/instance=postgres --ignore-not-found
+  # Same for production (if --with-prod ever brought it up). Unconditional + idempotent
+  # so a plain `teardown` never leaves a prod EBS volume orphaned.
+  helm uninstall postgres -n production 2>/dev/null || true
+  kubectl delete pvc -l app.kubernetes.io/instance=postgres -n production --ignore-not-found
   terraform -chdir="$STAGING" destroy -auto-approve
   log "Done. bootstrap/ (S3 state + AWS secret) was intentionally left untouched."
+}
+
+# ---- production data stack (only with --with-prod) --------------------------
+# Mirror of staging's data layer (ESO Secret + Postgres) but in the `production`
+# namespace, with its own credentials. Reuses the same values.yaml (namespace-agnostic)
+# and the shared cluster-wide ESO controller + ClusterSecretStore from step 2.
+deploy_prod_data() {
+  log "3p. Production data stack (namespace + ESO Secret + Postgres)"
+  kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
+
+  # Materialize postgres-credentials in `production` from kubeplay/production/postgres.
+  kubectl apply -f kubernetes/apps/eso/externalsecret-prod.yaml
+
+  echo "Waiting for ESO to sync the production postgres-credentials Secret..."
+  synced=false
+  for _ in $(seq 1 30); do
+    if kubectl get secret postgres-credentials -n production >/dev/null 2>&1; then
+      synced=true; break
+    fi
+    sleep 5
+  done
+  if [ "$synced" != true ]; then
+    echo "ERROR: prod Secret not synced after 150s:" >&2
+    kubectl describe externalsecret postgres-credentials -n production >&2 || true
+    exit 1
+  fi
+  echo "Prod Secret synced ✔"
+
+  # Postgres in `production`: own release (namespace-scoped, so 'postgres' doesn't
+  # collide with staging's), own EBS volume. The release MUST be named 'postgres' so
+  # its Service is postgres-postgresql — the host the backend resolves within its ns.
+  helm upgrade --install postgres bitnami/postgresql \
+    --namespace production \
+    --version "$PG_CHART_VERSION" \
+    -f kubernetes/apps/postgres/values.yaml
+  kubectl rollout status statefulset/postgres-postgresql -n production --timeout=300s
 }
 
 # ---- deploy -----------------------------------------------------------------
@@ -98,7 +143,7 @@ deploy() {
   # Belt-and-suspenders: retry the applies until the webhook is actually serving.
   for _ in $(seq 1 12); do
     if kubectl apply -f kubernetes/apps/eso/secretstore.yaml \
-       && kubectl apply -f kubernetes/apps/eso/externalsecret.yaml; then
+       && kubectl apply -f kubernetes/apps/eso/externalsecret-staging.yaml; then
       break
     fi
     echo "  webhook not serving yet, retrying in 5s..."
@@ -178,6 +223,13 @@ deploy() {
     -f kubernetes/apps/postgres/values.yaml
   kubectl rollout status statefulset/postgres-postgresql --timeout=300s
 
+  # 3p. Production data stack (opt-in) ----------------------------------------
+  # Bring up prod's data BEFORE its Argo apps so backend-prod finds Postgres + the
+  # Secret on first sync instead of crash-looping until they appear.
+  if $WITH_PROD; then
+    deploy_prod_data
+  fi
+
   # 3b. ArgoCD ----------------------------------------------------------------
   # The bootstrap paradox: Argo deploys our apps declaratively from git, but Argo
   # itself can't self-install — so deploy.sh (the imperative layer) installs it once.
@@ -189,8 +241,15 @@ deploy() {
     --namespace argocd --create-namespace --wait --timeout 5m
 
   # Register the Application CRs (one-time bootstrap). From here Argo watches git
-  # and reconciles backend/frontend itself — no kubectl apply of the apps needed.
-  kubectl apply -f kubernetes/argocd/
+  # and reconciles the apps itself — no kubectl apply of the apps needed. Staging
+  # apps always; prod apps only when --with-prod (else backend-prod would crash-loop
+  # against a production namespace with no Postgres/Secret).
+  kubectl apply -f kubernetes/argocd/backend-staging-app.yaml \
+                -f kubernetes/argocd/frontend-staging-app.yaml
+  if $WITH_PROD; then
+    kubectl apply -f kubernetes/argocd/backend-prod-app.yaml \
+                  -f kubernetes/argocd/frontend-prod-app.yaml
+  fi
 
   # 4. Apps are owned by Argo now ---------------------------------------------
   # Building/pushing images and deploying backend/frontend is no longer done here.
@@ -203,11 +262,23 @@ deploy() {
   # Substitute the resolved nip.io host, then let cert-manager's ingress-shim see
   # the annotation and issue the cert into the kubeplay-tls Secret automatically.
   log "5. Ingress + TLS (host: $HOST)"
-  sed "s|<HOST>|$HOST|g" kubernetes/apps/ingress.yaml | kubectl apply -f -
+  sed "s|<HOST>|$HOST|g" kubernetes/apps/ingress-staging.yaml | kubectl apply -f -
   echo "Waiting for Let's Encrypt to issue the certificate..."
   # The auto-created Certificate is named after the secretName (kubeplay-tls).
-  kubectl wait --for=condition=Ready certificate/kubeplay-tls --timeout=180s \
-    || kubectl describe certificate kubeplay-tls || true
+  kubectl wait --for=condition=Ready certificate/kubeplay-tls -n default --timeout=180s \
+    || kubectl describe certificate kubeplay-tls -n default || true
+
+  # 5p. Production Ingress + TLS (opt-in) -------------------------------------
+  # Same shared NLB; host prefixed `prod.` (nip.io resolves it to the same IP), so
+  # nginx routes by Host header to the production-namespace Services. Its cert is a
+  # separate kubeplay-tls Secret issued into the production namespace.
+  if $WITH_PROD; then
+    log "5p. Production Ingress + TLS (host: prod.$HOST)"
+    sed "s|<HOST>|$HOST|g" kubernetes/apps/ingress-prod.yaml | kubectl apply -f -
+    kubectl wait --for=condition=Ready certificate/kubeplay-tls -n production --timeout=180s \
+      || kubectl describe certificate kubeplay-tls -n production || true
+    echo "Production host: https://prod.$HOST"
+  fi
 
   # 6. Verify -----------------------------------------------------------------
   log "6. Status"
@@ -221,7 +292,7 @@ Deploy complete. The app is live over HTTPS at:
 
 NOTE: we start on Let's Encrypt STAGING, so the browser shows a red
 "not private" warning — that is expected. The cert is real, just signed by an
-untrusted staging CA. Flip the annotation in kubernetes/apps/ingress.yaml to
+untrusted staging CA. Flip the annotation in kubernetes/apps/ingress-staging.yaml to
 'letsencrypt-prod' and re-run to get a trusted 🔒.
 
 Tear everything down at the end of the session with:
@@ -231,8 +302,18 @@ EOF
 }
 
 # ---- entrypoint -------------------------------------------------------------
-case "${1:-deploy}" in
+# Parse a command (deploy|teardown) and an optional --with-prod flag, in any order.
+CMD="deploy"
+WITH_PROD=false
+for arg in "$@"; do
+  case "$arg" in
+    deploy|teardown) CMD="$arg" ;;
+    --with-prod)     WITH_PROD=true ;;
+    *) echo "usage: $0 [deploy|teardown] [--with-prod]" >&2; exit 1 ;;
+  esac
+done
+
+case "$CMD" in
   deploy)   deploy ;;
   teardown) teardown ;;
-  *) echo "usage: $0 [deploy|teardown]" >&2; exit 1 ;;
 esac

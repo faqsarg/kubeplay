@@ -1,0 +1,28 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: backend-prod
+  # Application objects themselves live in Argo's namespace, not where the app runs.
+  namespace: argocd
+spec:
+  project: default
+
+  # WHAT to deploy: the PRODUCTION overlay. Its image tag is bumped only by
+  # deploy-production.yml (approved `v*` release), never by the merge-to-main CD.
+  source:
+    repoURL: https://github.com/faqsarg/kubeplay.git
+    targetRevision: main
+    path: kubernetes/apps/backend/overlays/production
+
+  # WHERE to deploy: same cluster Argo runs in, but a separate namespace.
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: production
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # The `production` namespace does not exist yet — let Argo create it.
+      - CreateNamespace=true

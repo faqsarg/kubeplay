@@ -1,15 +1,27 @@
-# Look up the Postgres secret created in the bootstrap layer (by name),
-# so this environment doesn't need to read bootstrap's state directly.
-data "aws_secretsmanager_secret" "postgres" {
-  name = "kubeplay/${var.environment}/postgres"
+# The single, cluster-wide ESO controller reads the Postgres secret for BOTH the
+# staging and production namespaces, so its one IAM role must be allowed to read
+# both. We CONSTRUCT the ARNs (region + account + name) instead of looking the
+# secrets up with a data source: a `data aws_secretsmanager_secret` fails `plan`
+# whenever the secret doesn't exist yet — e.g. the read-only CI plan gate, which
+# never applies the bootstrap layer, or a fresh clone before any apply. IAM
+# evaluates permissions at request time and never validates existence, so building
+# the ARN decouples the plan from provisioning order (same rationale as the CI
+# ECR-push role). Still least privilege: the two secret NAMES are enumerated, and
+# `-??????` matches only the 6-char suffix AWS appends — not other secrets.
+data "aws_caller_identity" "current" {}
+
+locals {
+  secret_arn_prefix = "arn:aws:secretsmanager:eu-west-1:${data.aws_caller_identity.current.account_id}:secret"
 }
 
-# Permission policy: this role may ONLY read that one secret (least privilege).
 data "aws_iam_policy_document" "eso_secrets" {
   statement {
-    effect    = "Allow"
-    actions   = ["secretsmanager:GetSecretValue"]
-    resources = [data.aws_secretsmanager_secret.postgres.arn]
+    effect  = "Allow"
+    actions = ["secretsmanager:GetSecretValue"]
+    resources = [
+      "${local.secret_arn_prefix}:kubeplay/${var.environment}/postgres-??????",
+      "${local.secret_arn_prefix}:kubeplay/production/postgres-??????",
+    ]
   }
 }
 

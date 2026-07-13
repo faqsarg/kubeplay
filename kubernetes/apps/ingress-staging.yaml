@@ -9,6 +9,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: kubeplay
+  namespace: default
   annotations:
     # cert-manager watches Ingresses with this annotation: it auto-creates a
     # Certificate for the tls hosts below and drops the cert into `kubeplay-tls`.

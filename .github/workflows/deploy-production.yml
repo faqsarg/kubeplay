@@ -1,0 +1,69 @@
+# CD (production) — build-once, PROMOTE. Triggered by pushing a release tag `v*`.
+#
+# Unlike staging CD, this workflow NEVER builds or pushes an image: the artifact was
+# already built and validated in staging. "Promotion" = copy the image tag staging
+# currently runs (from the staging overlay) into the production overlay, and commit it
+# to main. ArgoCD's production Application reconciles that commit into the `production`
+# namespace. So, like staging, the deploy IS a git commit — no cluster access needed.
+#
+# What gets promoted: whatever the STAGING overlay pins on main right now (i.e. exactly
+# what staging is running). The git tag is the human-meaningful release marker + trigger,
+# not the source of the image — reading staging's pinned tag guarantees we ship a real,
+# existing, staging-validated image regardless of what the tagged commit built.
+#
+# The gate: the `production` GitHub Environment. When it has required reviewers, this job
+# PAUSES until a human approves in the Actions UI. That approval MUST be configured once
+# in repo Settings -> Environments -> production -> Required reviewers (it cannot be set
+# from YAML; without it the job would run ungated).
+name: Deploy to production
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # to commit the promoted tag back to main. No id-token/AWS: nothing
+                    # is built or pushed here — the image already lives in ECR.
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    # The approval gate: the job waits here until a required reviewer approves.
+    environment: production
+    steps:
+      # Check out main (not the tag's detached HEAD): the promotion is a commit TO main.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      # kustomize isn't preinstalled on the runner; pin the same version staging CD uses.
+      - name: Set up kustomize
+        run: |
+          curl -sSfL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz" \
+            | tar xz
+          sudo mv kustomize /usr/local/bin/
+
+      # Copy the image each app currently runs in STAGING into the PRODUCTION overlay.
+      - name: Promote staging images to production
+        run: |
+          for app in backend frontend; do
+            staging_kust="kubernetes/apps/${app}/overlays/staging/kustomization.yaml"
+            new_name=$(awk '/^[[:space:]]*newName:/{print $2; exit}' "$staging_kust")
+            new_tag=$(awk  '/^[[:space:]]*newTag:/{print $2; exit}'  "$staging_kust")
+            echo "Promoting ${app}: ${new_name}:${new_tag}"
+            (cd "kubernetes/apps/${app}/overlays/production" \
+               && kustomize edit set image "${app}=${new_name}:${new_tag}")
+          done
+
+      # Commit the promoted tags to main. Only touches kubernetes/apps/**/production, so
+      # it doesn't re-trigger staging CD (its paths filter is apps/**); [skip ci] too.
+      - name: Commit and push production tags
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add kubernetes/apps/backend/overlays/production/kustomization.yaml \
+                  kubernetes/apps/frontend/overlays/production/kustomization.yaml
+          git commit -m "deploy: production ${GITHUB_REF_NAME} [skip ci]" \
+            || { echo "production already at the staging image — nothing to promote"; exit 0; }
+          git push origin HEAD:main

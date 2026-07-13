@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# BASE = the environment-agnostic definition of the backend app: WHAT it is,
+# not WHERE it runs or WHICH image tag. No namespace, no image tag here — those
+# are per-environment decisions that live in the overlays.
+#
+# deployment.yaml refers to the image by the abstract name `backend`; each
+# overlay binds that name to the real ECR repo + the tag to deploy.
+resources:
+- configmap.yaml
+- deployment.yaml
+- service.yaml
+- hpa.yaml

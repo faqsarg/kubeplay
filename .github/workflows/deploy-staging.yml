@@ -56,11 +56,12 @@ jobs:
             | tar xz
           sudo mv kustomize /usr/local/bin/
 
-      # The whole point: rewrite ONLY the newTag line in each kustomization.yaml.
+      # The whole point: rewrite ONLY the newTag line in the STAGING overlay's
+      # kustomization.yaml (prod's overlay is bumped by deploy-production.yml instead).
       - name: Bump image tags
         run: |
-          (cd kubernetes/apps/backend  && kustomize edit set image "backend=${ECR_REGISTRY}/staging-backend:${GITHUB_SHA}")
-          (cd kubernetes/apps/frontend && kustomize edit set image "frontend=${ECR_REGISTRY}/staging-frontend:${GITHUB_SHA}")
+          (cd kubernetes/apps/backend/overlays/staging  && kustomize edit set image "backend=${ECR_REGISTRY}/staging-backend:${GITHUB_SHA}")
+          (cd kubernetes/apps/frontend/overlays/staging && kustomize edit set image "frontend=${ECR_REGISTRY}/staging-frontend:${GITHUB_SHA}")
 
       # Commit the bump back to main. Pushes made with GITHUB_TOKEN don't re-trigger
       # workflows (GitHub blocks the recursion); [skip ci] is belt-and-suspenders.
@@ -68,6 +69,6 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add kubernetes/apps/backend/kustomization.yaml kubernetes/apps/frontend/kustomization.yaml
+          git add kubernetes/apps/backend/overlays/staging/kustomization.yaml kubernetes/apps/frontend/overlays/staging/kustomization.yaml
           git commit -m "deploy: staging ${GITHUB_SHA} [skip ci]" || { echo "no image change to deploy"; exit 0; }
           git push
