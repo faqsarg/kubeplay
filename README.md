@@ -170,10 +170,11 @@ it, and whose permissions are least-privilege for its job. The roles live in the
 |----------|---------|------|--------------|
 | `.github/workflows/ci.yml` | pull_request | `kubeplay-github-ci` (ECR push) | Build + `go vet`/`test`, push both images to ECR tagged with the commit SHA. |
 | `.github/workflows/terraform.yml` | PR touching `terraform/**`, `bootstrap/**` | `kubeplay-github-plan` (`ReadOnlyAccess`) | `fmt` + `validate` (no creds) and `plan` (read-only). **Never applies** — a merge-triggered apply would spin a billable cluster in this ephemeral model. |
+| `.github/workflows/deploy-staging.yml` | push to `main` touching `apps/**` | `kubeplay-github-ci` (ECR push) | CD via GitOps: build + push images tagged with the `main` SHA, bump the kustomize image tags, commit them back to `main`. **Never touches the cluster** — ArgoCD reconciles that commit into staging. |
 
 Images are built once and promoted by immutable SHA tag (never `latest`); `apply` stays a
-deliberate manual action. Deploy workflows (staging on merge, production behind an approval
-gate) are the next step.
+deliberate manual action. The staging deploy runs automatically on merge via GitOps (above);
+a production deploy behind an approval gate is the next step.
 
 ---
 
@@ -280,6 +281,17 @@ Per-environment values live in `terraform.tfvars`. Staging defaults:
 
 - **Modular Terraform** — `networking` and `eks` are independent, reusable modules;
   environments only compose them, keeping per-env code minimal.
+- **One cluster, namespace-based environments** — "environment" means two different
+  things here. In Terraform there is a *single* infrastructure deployment (VPC, EKS,
+  node group) defined under `terraform/environments/staging/`. Inside that one cluster,
+  **staging and production are Kubernetes namespaces**, not separate clusters. So there
+  is deliberately no `terraform/environments/production/`: promoting to production never
+  re-provisions VPC/subnets/EKS — it only deploys the app + its data stack into the
+  `production` namespace (own Postgres and ESO-synced `Secret`, since those are
+  namespace-scoped). This trades physical isolation for cost and a fast `apply`/`destroy`
+  cycle; a real product would use a separate cluster (and likely account) per environment.
+  The Terraform dir keeps the historical name `staging` to avoid churning the remote-state
+  key and CI paths — read it as "the shared cluster".
 - **Remote state with locking** — S3 + DynamoDB instead of local state, so the
   setup is team-safe and recoverable.
 - **SPOT nodes** — ~70% cheaper than on-demand; acceptable for a non-production

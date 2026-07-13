@@ -104,8 +104,8 @@ helm upgrade --install external-secrets external-secrets/external-secrets \
 # created, else: "no endpoints available for service external-secrets-webhook".
 kubectl wait --for=condition=Available deployment --all -n external-secrets --timeout=180s
 
-kubectl apply -f kubernetes/apps/eso/secretstore.yaml      # ClusterSecretStore (cluster-scoped)
-kubectl apply -f kubernetes/apps/eso/externalsecret.yaml   # ExternalSecret in default
+kubectl apply -f kubernetes/apps/eso/secretstore.yaml              # ClusterSecretStore (cluster-scoped)
+kubectl apply -f kubernetes/apps/eso/externalsecret-staging.yaml   # ExternalSecret in default
 
 # The ExternalSecret should report SecretSynced; the Secret must exist BEFORE Postgres boots.
 kubectl get secret postgres-credentials -n default
@@ -203,13 +203,13 @@ more.
 Ingress, then cert-manager's ingress-shim issues the cert into the `kubeplay-tls` Secret.
 
 ```bash
-sed "s|<HOST>|$HOST|g" kubernetes/apps/ingress.yaml | kubectl apply -f -
+sed "s|<HOST>|$HOST|g" kubernetes/apps/ingress-staging.yaml | kubectl apply -f -
 kubectl wait --for=condition=Ready certificate/kubeplay-tls --timeout=180s
 ```
 
 > The app comes up on Let's Encrypt **staging** by default → the browser shows a red "not
 > private" warning (the cert is real, just signed by an untrusted staging CA). Flip the
-> annotation in `kubernetes/apps/ingress.yaml` to `letsencrypt-prod` and re-run for a
+> annotation in `kubernetes/apps/ingress-staging.yaml` to `letsencrypt-prod` and re-run for a
 > trusted 🔒.
 
 ---
