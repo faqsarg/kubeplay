@@ -1,0 +1,43 @@
+# Production Ingress: same routing rules as staging, but in the `production`
+# namespace (an Ingress can only target Services in its own namespace) and on a
+# distinct host.
+#
+# The host is `prod.<HOST>`. nip.io resolves ANY label in front of an IP to that
+# IP, so `prod.<ip>.nip.io` and the staging `<ip>.nip.io` both point at the SAME
+# shared NLB — nginx then routes by Host header. deploy.sh substitutes <HOST> with
+# the resolved NLB IP (the same sed as staging), yielding `prod.<ip>.nip.io`.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kubeplay
+  namespace: production
+  annotations:
+    # Its own Certificate/Secret, issued into THIS namespace. Same ClusterIssuer
+    # (cluster-scoped, shared). Flip to letsencrypt-prod once issuance is confirmed.
+    cert-manager.io/cluster-issuer: letsencrypt-staging
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - prod.<HOST>
+      secretName: kubeplay-tls   # in `production`; no collision with staging's
+  rules:
+    - host: prod.<HOST>
+      http:
+        paths:
+          # Most-specific path wins: /api/* goes to the backend...
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8080
+          # ...everything else falls through to the frontend.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80
