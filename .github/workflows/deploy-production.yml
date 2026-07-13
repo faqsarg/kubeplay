@@ -21,6 +21,10 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual trigger: promote whatever staging currently runs, on demand. Also a
+  # reliable fallback when a release tag lands on a [skip ci] commit (which GitHub
+  # would otherwise refuse to trigger from).
+  workflow_dispatch:
 
 permissions:
   contents: write   # to commit the promoted tag back to main. No id-token/AWS: nothing

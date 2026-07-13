@@ -63,12 +63,15 @@ jobs:
           (cd kubernetes/apps/backend/overlays/staging  && kustomize edit set image "backend=${ECR_REGISTRY}/staging-backend:${GITHUB_SHA}")
           (cd kubernetes/apps/frontend/overlays/staging && kustomize edit set image "frontend=${ECR_REGISTRY}/staging-frontend:${GITHUB_SHA}")
 
-      # Commit the bump back to main. Pushes made with GITHUB_TOKEN don't re-trigger
-      # workflows (GitHub blocks the recursion); [skip ci] is belt-and-suspenders.
+      # Commit the bump back to main. Recursion is already prevented by this workflow's
+      # `paths: [apps/**]` filter: this commit only touches kubernetes/apps/**, so it
+      # can't re-trigger the build. We deliberately DON'T add [skip ci] — it would also
+      # suppress a release tag (v*) pushed onto this commit, which is exactly the event
+      # that must trigger deploy-production.yml.
       - name: Commit and push new tags
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add kubernetes/apps/backend/overlays/staging/kustomization.yaml kubernetes/apps/frontend/overlays/staging/kustomization.yaml
-          git commit -m "deploy: staging ${GITHUB_SHA} [skip ci]" || { echo "no image change to deploy"; exit 0; }
+          git commit -m "deploy: staging ${GITHUB_SHA}" || { echo "no image change to deploy"; exit 0; }
           git push
