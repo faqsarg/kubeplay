@@ -15,4 +15,4 @@ namespace: default
 images:
 - name: backend
   newName: 915170001562.dkr.ecr.eu-west-1.amazonaws.com/staging-backend
-  newTag: 3072aa1cb3ba86072e1af2576a1edcd2f5c2e5a2
+  newTag: 755f659f6688c3483a4ba779a18900e5d3c11e0c
