@@ -1,7 +1,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: backend
+  name: backend-staging
   # Application objects themselves live in Argo's namespace, not where the app runs.
   namespace: argocd
 spec:
@@ -12,7 +12,7 @@ spec:
   source:
     repoURL: https://github.com/faqsarg/kubeplay.git
     targetRevision: main
-    path: kubernetes/apps/backend
+    path: kubernetes/apps/backend/overlays/staging
 
   # WHERE to deploy: the same cluster Argo runs in (the in-cluster API), namespace default.
   destination:

@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# STAGING overlay = the base + this environment's two decisions:
+#   1. WHERE it runs  -> namespace
+#   2. WHICH image    -> the tag CI pins on every merge to main
+resources:
+- ../../base
+
+# Staging keeps living in `default` (where Postgres/ESO/ingress already are).
+namespace: default
+
+# The ONLY line that changes per release. CI updates newTag on every merge to
+# main via:  kustomize edit set image backend=<repo>:<sha>  (run in THIS dir).
+images:
+- name: backend
+  newName: 915170001562.dkr.ecr.eu-west-1.amazonaws.com/staging-backend
+  newTag: 3072aa1cb3ba86072e1af2576a1edcd2f5c2e5a2
