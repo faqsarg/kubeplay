@@ -12,4 +12,4 @@ namespace: default
 images:
 - name: frontend
   newName: 915170001562.dkr.ecr.eu-west-1.amazonaws.com/staging-frontend
-  newTag: 755f659f6688c3483a4ba779a18900e5d3c11e0c
+  newTag: 64a729f2cf2a613d40fdde1f5320836f9ed7091d
