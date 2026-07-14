@@ -10,3 +10,5 @@ terraform.tfstate.backup
 
 # personal planning doc — kept local only
 plan.md
+
+apps/backend/backend

@@ -1,0 +1,18 @@
+# ServiceMonitor — the CRD the Prometheus Operator watches. It declares HOW to
+# scrape the backend, and lives next to the app on purpose (monitoring as code).
+# The Operator reads it and regenerates Prometheus' scrape config automatically —
+# we never touch prometheus.yml by hand.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: backend
+spec:
+  # WHICH Service to scrape: the one labelled app=backend (our Service, Pieza 1).
+  selector:
+    matchLabels:
+      app: backend
+  # WHERE on it: the named port `http`, path /metrics, every 15s.
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
