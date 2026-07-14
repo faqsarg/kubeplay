@@ -124,6 +124,21 @@ deploy() {
     -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}' \
     2>/dev/null || true
 
+  # 1c. Monitoring (kube-prometheus-stack) ------------------------------------
+  # Prometheus + Grafana + Alertmanager + node-exporter + kube-state-metrics in
+  # one umbrella chart. Placed right after the StorageClass (1b) on purpose:
+  # Prometheus and Grafana provision PVCs, so the default gp3 class must already
+  # exist or their pods stay Pending — the same dependency Postgres has. This is
+  # platform, so deploy.sh installs it imperatively (Argo only owns the apps).
+  log "1c. kube-prometheus-stack (Prometheus + Grafana + Alertmanager)"
+  helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
+  helm repo update prometheus-community >/dev/null
+  # --wait blocks until every component is Ready; the chart ships many CRDs and
+  # Deployments, so give it a generous timeout.
+  helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+    --namespace monitoring --create-namespace --wait --timeout 10m \
+    -f kubernetes/platform/monitoring/values.yaml
+
   # 2. ESO --------------------------------------------------------------------
   log "2. External Secrets Operator + secret sync"
   ROLE_ARN="$(terraform -chdir="$STAGING" output -raw eso_irsa_role_arn)"

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // appVersion is the single source of truth for the running app version, surfaced
@@ -151,6 +152,12 @@ func main() {
 	mux.HandleFunc("GET /api/version", version)
 	mux.HandleFunc("GET /api/items", listItems)
 	mux.HandleFunc("POST /api/items", createItem)
+
+	// /metrics exposes the app's metrics in Prometheus text format. promhttp.Handler()
+	// serves the DEFAULT registry, which already collects Go runtime + process metrics
+	// (goroutines, heap, GC, open FDs) for free — no instrumentation on our side yet.
+	// This is the "expose" side of the contract; the ServiceMonitor is the "scrape" side.
+	mux.Handle("GET /metrics", promhttp.Handler())
 
 	log.Println("listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", mux))

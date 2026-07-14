@@ -1,0 +1,24 @@
+# kube-prometheus-stack — the monitoring umbrella chart: bundles Prometheus,
+# Grafana, Alertmanager, node-exporter and kube-state-metrics, already wired
+# together. Installed via Helm (see scripts/deploy.sh).
+#
+# The chart's keys are namespaced by subchart: `grafana:` configures the Grafana
+# subchart, `prometheus:` the Prometheus one, etc.
+
+grafana:
+  # Study cluster only — a real deploy would source this from ESO, like Postgres.
+  adminPassword: "admin"
+
+prometheus:
+  prometheusSpec:
+    # How long metrics live on disk before Prometheus drops them. A study cluster
+    # gets torn down nightly, so a week is plenty and keeps the EBS volume small.
+    retention: 7d
+
+    # By default the Operator only adopts ServiceMonitors labelled
+    # `release: kube-prometheus-stack`. Setting this to false makes Prometheus
+    # discover EVERY ServiceMonitor in the cluster, so our app manifests don't
+    # have to hard-code the monitoring release name. Same for PodMonitors/rules.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
